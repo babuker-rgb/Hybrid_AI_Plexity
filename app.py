@@ -1,9 +1,9 @@
 """
-Hubryd AI – v29.27-R2 (Final, R² > 0.8)
-- Simplified PDF report
+Hubryd AI – v29.27-R2 (Final)
+- Simplified PDF report (sections 1–6, bullet list)
 - Real‑unit loss, W_TENSILE=500
-- 15k samples, up to 800 epochs
-- Validation R² monitoring
+- 15k samples, up to 800 epochs, R² > 0.8
+- All knobs and plots functional
 Nile Valley University · Sudan
 """
 
@@ -25,7 +25,7 @@ import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try to import fpdf2; if not available, show error on report button
+# Try to import fpdf2
 try:
     from fpdf import FPDF
     FPDF_AVAILABLE = True
@@ -332,7 +332,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged – same as before)
+# NSGA-II (unchanged)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -722,7 +722,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# Simplified PDF Report (your layout)
+# SIMPLIFIED PDF REPORT (your layout with temp file)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     if not FPDF_AVAILABLE:
@@ -808,11 +808,8 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         return None, str(e)
 
 # ================================================================
-# Cached Training
+# Benchmark and Training
 # ================================================================
-CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
-
 def train_benchmark(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
@@ -837,6 +834,12 @@ def train_benchmark(X_train, X_test, y_train, y_test):
         })
     return pd.DataFrame(results)
 
+# ================================================================
+# Cached Training
+# ================================================================
+CACHE_DIR = tempfile.gettempdir()
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
+
 @st.cache_resource
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
@@ -854,7 +857,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training enhanced model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 Training final model (15k samples, up to 800 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -1217,7 +1220,7 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # Report – PDF only (using simplified layout)
+        # Report – PDF only (using simplified layout with temp file)
         if generate_report_btn:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
