@@ -103,7 +103,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions
+# Helper Functions (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -326,7 +326,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II
+# NSGA-II (unchanged)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS, granule_fixed=True, granule_fixed_val=125.0):
@@ -697,7 +697,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (includes all three solutions)
+# PDF Report (FIXED – replaces en dash with hyphen)
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution, 
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
@@ -707,6 +707,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
+        # Replace any en dash with hyphen in title
         pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
         pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
@@ -716,6 +717,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
         pdf.set_font("Arial", "", 10)
+        # All text values are ASCII; we'll ensure they don't contain en dash
         pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
@@ -736,8 +738,9 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "3. Constraints Status (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)", ln=True)
+        pdf.cell(0, 8, "3. Constraints Status (D: 0.70-0.99, Tensile >= 1.50, EFRF < 0.40)", ln=True)
         pdf.set_font("Arial", "", 10)
+        # Use hyphens instead of en dash
         pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
@@ -803,7 +806,16 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "", 10)
         if bench_df is not None:
             for _, row in bench_df.iterrows():
-                pdf.cell(0, 6, f"{row['Model']}: R² = {row['R2 (Test)']} | RMSE = {row['RMSE (MPa)']} | MAE = {row['MAE (MPa)']}", ln=True)
+                # Replace any en dash with hyphen in the text
+                model_name = row['Model']
+                r2_str = row['R2 (Test)']
+                rmse_str = row['RMSE (MPa)']
+                mae_str = row['MAE (MPa)']
+                # Replace en dash (U+2013) with hyphen
+                r2_str = r2_str.replace('–', '-')
+                rmse_str = rmse_str.replace('–', '-')
+                mae_str = mae_str.replace('–', '-')
+                pdf.cell(0, 6, f"{model_name}: R2 = {r2_str} | RMSE = {rmse_str} | MAE = {mae_str}", ln=True)
         pdf.ln(4)
 
         if fronts is not None and len(fronts) > 0:
@@ -819,7 +831,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         return None, str(e)
 
 # ================================================================
-# Cached Training
+# Cached Training (unchanged)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
 CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_optional.pt')
@@ -918,7 +930,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI
+# Streamlit UI (full – same as before)
 # ================================================================
 st.set_page_config(page_title="Hybrid AI for Multi-Objective Optimization", layout="wide")
 
@@ -1191,7 +1203,7 @@ with col_right:
         else:
             st.info("No balanced solution found.")
 
-        # ---- Optional: Cost-wise and Quality-wise (shown only if toggled) ----
+        # ---- Optional: Cost-wise and Quality-wise ----
         # They appear after the balanced solution, controlled by knobs.
 
         # ---- Knobs Row (with toggles) ----
