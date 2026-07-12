@@ -1,13 +1,13 @@
 """
-Hubryd AI – v29.27-R2 (Optional Cost/Quality Solutions)
+Hubryd AI – v29.27-R2 (Final)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
 - PINN outputs raw scaled values (R² > 0.99)
 - NSGA-II: Pop=80, Gen=50
 - Ranges: D (0.70–0.99), Tensile ≥ 1.50, EFRF < 0.50, Pressure ≤ 400 MPa
-- Golden (balanced) solution always shown
-- Cost-wise and Quality-wise solutions shown only when toggled
+- Golden (balanced) solution: always shown (written + plotted)
+- Cost-wise and Quality-wise solutions: shown only on request (written only)
+- Tested solution: plotted as blue circle on Pareto front
 - PDF report includes all three solutions
-- All knobs and plots functional
 Nile Valley University · Sudan
 """
 
@@ -557,7 +557,15 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
             points.append({'API': api_n, 'EFRF': efrf})
     return pd.DataFrame(points)
 
-def plot_pareto_clean(objectives, fronts, feasible_df=None, tested_point=None, efrf_max=0.40):
+def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None, tested_point=None, efrf_max=0.40):
+    """
+    Pareto plot with:
+    - Feasible region (light green dots)
+    - Pareto front (red line + markers)
+    - Balanced solution (gold star) – always shown
+    - Tested solution (blue circle) – always shown
+    Cost-wise and Quality-wise solutions are NOT plotted here.
+    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -585,6 +593,21 @@ def plot_pareto_clean(objectives, fronts, feasible_df=None, tested_point=None, e
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
+    # Balanced solution (gold star) – always shown
+    if balanced_solution is not None:
+        d, t, e, ef = predict_pinn(None, None, None, balanced_solution)  # We'll compute later in UI
+        # We'll add it in the UI section with actual predictions
+        pass  # We'll add the trace in the UI after computing predictions
+    # Tested solution (blue circle) – always shown
+    if tested_point is not None:
+        fig.add_trace(go.Scatter(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+        ))
     fig.add_hline(y=0.40, line_dash='dash', line_color='gray',
                   annotation_text='EFRF threshold (0.40)')
     fig.update_layout(
@@ -697,7 +720,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (FIXED – replaces en dash with hyphen)
+# PDF Report (includes all three solutions)
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution, 
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
@@ -707,7 +730,6 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
-        # Replace any en dash with hyphen in title
         pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
         pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
@@ -717,7 +739,6 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
         pdf.set_font("Arial", "", 10)
-        # All text values are ASCII; we'll ensure they don't contain en dash
         pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
@@ -740,7 +761,6 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "3. Constraints Status (D: 0.70-0.99, Tensile >= 1.50, EFRF < 0.40)", ln=True)
         pdf.set_font("Arial", "", 10)
-        # Use hyphens instead of en dash
         pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
@@ -806,12 +826,10 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "", 10)
         if bench_df is not None:
             for _, row in bench_df.iterrows():
-                # Replace any en dash with hyphen in the text
                 model_name = row['Model']
                 r2_str = row['R2 (Test)']
                 rmse_str = row['RMSE (MPa)']
                 mae_str = row['MAE (MPa)']
-                # Replace en dash (U+2013) with hyphen
                 r2_str = r2_str.replace('–', '-')
                 rmse_str = rmse_str.replace('–', '-')
                 mae_str = mae_str.replace('–', '-')
@@ -834,7 +852,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training (unchanged)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_optional.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -903,7 +921,7 @@ def load_or_train():
                 if val_r2 > best_val_r2:
                     best_val_r2 = val_r2
                     patience_counter = 0
-                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_optional.pt'))
+                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final_eng.pt'))
                 else:
                     patience_counter += 1
                     if patience_counter >= PATIENCE:
@@ -912,8 +930,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_optional.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_optional.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final_eng.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final_eng.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -930,7 +948,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI (full – same as before)
+# Streamlit UI – Final English Version
 # ================================================================
 st.set_page_config(page_title="Hybrid AI for Multi-Objective Optimization", layout="wide")
 
@@ -955,7 +973,7 @@ with st.sidebar:
     ✅ **NSGA‑II:** Pop=80, Gen=50  
     ✅ **Network:** 256 Neurons
     """)
-    st.caption("🔬 v29.27-R2 — Optional Solutions")
+    st.caption("🔬 v29.27-R2 — Final English")
 
 # Load model
 try:
@@ -1072,7 +1090,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- Extract 3 Golden Solutions ----
+            # ---- Extract 3 Solutions ----
             balanced_idx = None
             quality_idx = None
             cost_idx = None
@@ -1143,43 +1161,24 @@ with col_right:
                 num_solutions = len(fronts[0])
                 st.success(f"✅ Pareto front found: {num_solutions} optimal solutions (Pop={NSGA_POP}, Gen={NSGA_GENS})")
                 
-                fig = plot_pareto_clean(objectives, fronts, feasible_df, tested_point, efrf_max=0.40)
+                # Build the plot without markers first
+                fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
                 if fig is not None:
-                    # Add marker for balanced solution always
+                    # Add balanced solution marker (gold star) – always shown
                     if balanced_solution is not None:
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
                         fig.add_trace(go.Scatter(
                             x=[balanced_solution[0]],
                             y=[ef],
                             mode='markers',
-                            name='⭐ Balanced (always)',
+                            name='⭐ Balanced (Golden)',
                             marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
-                            hovertemplate='Balanced<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                            hovertemplate='Balanced (Golden)<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
                         ))
-                    # Optionally add cost and quality markers if toggled
-                    if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
-                        fig.add_trace(go.Scatter(
-                            x=[cost_solution[0]],
-                            y=[ef],
-                            mode='markers',
-                            name='💰 Cost-wise',
-                            marker=dict(size=10, color='orange', symbol='diamond', line=dict(width=2, color='black')),
-                            hovertemplate='Cost-wise<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                        ))
-                    if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
-                        fig.add_trace(go.Scatter(
-                            x=[quality_solution[0]],
-                            y=[ef],
-                            mode='markers',
-                            name='🏆 Quality-wise',
-                            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='black')),
-                            hovertemplate='Quality-wise<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                        ))
+                    # The tested point is already added by the plot function
                     st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Always show the Balanced (Golden) solution ----
+        # ---- Always show the Balanced (Golden) solution in writing ----
         st.markdown("### ⭐ Golden Solution (Balanced – Always Shown)")
         if balanced_solution is not None:
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
@@ -1203,10 +1202,7 @@ with col_right:
         else:
             st.info("No balanced solution found.")
 
-        # ---- Optional: Cost-wise and Quality-wise ----
-        # They appear after the balanced solution, controlled by knobs.
-
-        # ---- Knobs Row (with toggles) ----
+        # ---- Knobs Row ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional sections:**")
         knob_cols = st.columns(7)
@@ -1227,19 +1223,19 @@ with col_right:
                                       key="knob_particle_plot")
             st.session_state.show_particle_plot = show_particle
         with knob_cols[4]:
-            show_cost = st.toggle("💰 Cost-wise", value=st.session_state.get('show_cost_solution', False),
+            show_cost = st.toggle("💰 Cost-wise (written only)", value=st.session_state.get('show_cost_solution', False),
                                   key="knob_cost")
             st.session_state.show_cost_solution = show_cost
         with knob_cols[5]:
-            show_quality = st.toggle("🏆 Quality-wise", value=st.session_state.get('show_quality_solution', False),
+            show_quality = st.toggle("🏆 Quality-wise (written only)", value=st.session_state.get('show_quality_solution', False),
                                      key="knob_quality")
             st.session_state.show_quality_solution = show_quality
         with knob_cols[6]:
             generate_report_btn = st.button("📄 Report", key="knob_report")
 
-        # ---- Display optional solutions based on toggles ----
+        # ---- Show optional solutions in writing only ----
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
-            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
+            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure) – Written Only")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
             col1, col2 = st.columns(2)
             with col1:
@@ -1260,7 +1256,7 @@ with col_right:
             st.session_state.cost_pred = (d, t, e, ef)
 
         if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
-            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength)")
+            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength) – Written Only")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
             col1, col2 = st.columns(2)
             with col1:
