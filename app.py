@@ -1,9 +1,11 @@
 """
-Hubryd AI – v29.27-R2 (Enhanced with 3 Golden Solutions)
+Hubryd AI – v29.27-R2 (Optional Cost/Quality Solutions)
 - PINN outputs raw scaled values (R² > 0.95)
 - NSGA-II: Pop=80, Gen=50
-- Extracts 3 optimal solutions: Balanced, Quality-wise, Cost-wise
-- PDF report without "R²" in title
+- Ranges: D (0.70–0.99), Tensile ≥ 1.50, EFRF < 0.50, Pressure ≤ 400 MPa
+- Golden (balanced) solution always shown
+- Cost-wise and Quality-wise solutions shown only when toggled
+- PDF report includes all three solutions
 - All knobs and plots functional
 Nile Valley University · Sudan
 """
@@ -33,28 +35,27 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants
+# Physics Constants – SPECIFIED WIDE RANGES
 # ================================================================
-D_MIN = 0.40
-D_MAX = 0.97
-TENSILE_MIN = 1.90
-EFRF_MAX = 0.40
+D_MIN = 0.70
+D_MAX = 0.99
+TENSILE_MIN = 1.50
+EFRF_MAX = 0.50                 # Exploration upper limit
 MCC_MAX = 8.0
-PRESSURE_MAX = 300.0
-BINDER_MIN = 0.5
-BINDER_MAX = 5.0
+PRESSURE_MAX = 400.0
+BINDER_MIN = 0.3
+BINDER_MAX = 6.0
 
 # ================================================================
-# Training Parameters – ENHANCED
+# Training Parameters
 # ================================================================
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
 PATIENCE = 80
-NSGA_POP = 80          # Increased to get more Pareto solutions
-NSGA_GENS = 50          # Increased generations for better convergence
+NSGA_POP = 80
+NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# Loss weights – heavily biased toward tensile
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
@@ -78,13 +79,15 @@ if 'api' not in st.session_state:
         'show_sensitivity': False,
         'show_comparison': True,
         'show_particle_plot': False,
+        'show_cost_solution': False,      # NEW: toggle for cost-wise solution
+        'show_quality_solution': False,   # NEW: toggle for quality-wise solution
         'granule_mode': 'Fixed',
         'nsga_pop': None,
         'nsga_objectives': None,
         'nsga_fronts': None,
-        'balanced_solution': None,   # Golden / Balanced
-        'quality_solution': None,    # Max tensile
-        'cost_solution': None,       # Max API, min pressure
+        'balanced_solution': None,
+        'quality_solution': None,
+        'cost_solution': None,
         'run_optimized': False,
         'formulation': {
             'api_n': None, 'binder_n': None, 'pvpp_n': None,
@@ -225,7 +228,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (raw scaled outputs)
+# PINN Model (unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -255,7 +258,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)   # density, tensile, ER, k, A
+        self.output = nn.Linear(hidden//2, 5)
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -263,7 +266,6 @@ class MultiTaskPINN(nn.Module):
         x = self.res2(x)
         x = self.transition(x)
         raw = self.output(x)
-        # Predict values directly in the scaled domain for high convergence stability
         density = raw[:, 0:1]
         tensile = raw[:, 1:2]
         er = raw[:, 2:3]
@@ -292,13 +294,13 @@ class MultiTaskPINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Standard MSE on the scaled domain
+        # Standard MSE on scaled domain
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er
 
-        # Unscale variables exclusively to apply real physical constraints
+        # Unscale for physics constraints
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -307,14 +309,14 @@ class MultiTaskPINN(nn.Module):
         tensile_real = tensile_pred * scale_tensile + mean_tensile
         er_real = er_pred * scale_er + mean_er
 
-        # Heckel physical relationship
+        # Heckel
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_real, min=1e-4))
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # EFRF real unit constraint
+        # EFRF (penalize above 0.50, but feasibility is at 0.40)
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
-        efrf_penalty = torch.mean(torch.relu(efrf_real - EFRF_MAX) ** 2) * W_EFRF_PENALTY
+        efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
 
         mcc_penalty = torch.mean(torch.relu(mcc - MCC_MAX) ** 2) * 0.3
         density_penalty = torch.mean(torch.relu(density_real - D_MAX) ** 2 + torch.relu(D_MIN - density_real) ** 2) * 0.5
@@ -323,7 +325,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (with increased pop and gens)
+# NSGA-II (unchanged)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS, granule_fixed=True, granule_fixed_val=125.0):
@@ -372,8 +374,8 @@ class NSGAII:
             penalty = 0.0
             if tensile < TENSILE_MIN:
                 penalty += (TENSILE_MIN - tensile) ** 2
-            if efrf >= EFRF_MAX:
-                penalty += (efrf - EFRF_MAX) ** 2
+            if efrf >= 0.40:  # feasibility threshold
+                penalty += (efrf - 0.40) ** 2
             if mcc > MCC_MAX:
                 penalty += (mcc - MCC_MAX) ** 2
             objectives[i, 0] = -(api) + 100.0 * penalty
@@ -516,7 +518,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers
+# Prediction and Plotting Helpers (unchanged)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -550,7 +552,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
         api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
         inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule]
         density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
-        if (D_MIN <= density <= D_MAX and tensile >= TENSILE_MIN and efrf < EFRF_MAX and mcc_n <= MCC_MAX):
+        if (D_MIN <= density <= D_MAX and tensile >= TENSILE_MIN and efrf < 0.40 and mcc_n <= MCC_MAX):
             points.append({'API': api_n, 'EFRF': efrf})
     return pd.DataFrame(points)
 
@@ -569,7 +571,7 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, quality_soluti
             x=feasible_df['API'],
             y=feasible_df['EFRF'],
             mode='markers',
-            name='Feasible Region',
+            name='Feasible Region (EFRF<0.40)',
             marker=dict(color='lightgreen', size=4, opacity=0.4),
             hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>',
             showlegend=True
@@ -583,17 +585,15 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, quality_soluti
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
-    # Mark the three solutions
+    # Mark the balanced solution always (gold star)
     if balanced_solution is not None:
-        b_pred = predict_pinn(None, None, None, balanced_solution)  # We'll call with dummy – better to have model
-        # Actually we need model and scaler to predict, but we can compute later outside
-        # We'll mark them later using session state
-        pass  # We'll plot these separately in the UI after fetching predictions
-    # For now, we keep the plot generic and add markers via UI
-    fig.add_hline(y=efrf_max, line_dash='dash', line_color='gray',
-                  annotation_text=f'EFRF threshold {efrf_max}')
+        d, t, e, ef = predict_pinn(None, None, None, balanced_solution)  # We'll use dummy; actual call in UI
+        # We'll add markers in UI code to avoid dependency on model here
+        pass
+    fig.add_hline(y=0.40, line_dash='dash', line_color='gray',
+                  annotation_text='EFRF threshold (0.40)')
     fig.update_layout(
-        title='Pareto Front with Feasible Region',
+        title='Pareto Front with Feasible Region (D: 0.70–0.99, EFRF<0.40)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -655,8 +655,8 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
         textposition='outside',
         hovertemplate='%{y}<br>ΔEFRF: %{x:.4f}<extra></extra>'
     ))
-    fig.add_vline(x=efrf_max, line_dash='dash', line_color='red',
-                  annotation_text=f'EFRF threshold {efrf_max}')
+    fig.add_vline(x=0.40, line_dash='dash', line_color='red',
+                  annotation_text='EFRF threshold 0.40')
     fig.update_layout(
         title='Parameter Impact on EFRF (absolute change across full range)',
         xaxis_title='Absolute change in EFRF',
@@ -693,7 +693,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
         hovertemplate='Granule: %{x:.0f} µm<br>Pressure: %{y:.0f} MPa<br>Density: %{z:.3f}<extra></extra>'
     ))
     fig.update_layout(
-        title='Density vs Particle Size and Pressure',
+        title='Density vs Particle Size and Pressure (D: 0.70–0.99)',
         xaxis_title='Granule Size (µm)',
         yaxis_title='Pressure (MPa)',
         height=450,
@@ -702,7 +702,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (without "R²" in title)
+# PDF Report (includes all three solutions)
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution, 
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
@@ -712,8 +712,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
-        # Title without R² mention
-        pdf.cell(0, 10, "تقرير تحسين تركيبة الأقراص – Hubryd AI v29.27-R2", ln=True, align='C')
+        pdf.cell(0, 10, "تقرير تحسين تركيبة الأقراص – Hubryd AI v29.27-R2 (نطاقات محددة)", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
         pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
         pdf.ln(4)
@@ -742,15 +741,15 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.cell(0, 8, "3. Constraints Status (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)", ln=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
         pdf.cell(60, 6, f"MCC Status: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}", ln=True)
         pdf.ln(4)
 
-        # ---- Golden Solutions (3) ----
+        # ---- All three solutions ----
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "4. Optimised Solutions (Pareto Front)", ln=True)
         pdf.set_font("Arial", "B", 10)
@@ -828,7 +827,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training (unchanged)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_optional.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -847,7 +846,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training enhanced model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 Training specified-range model (15k samples, up to 800 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -897,7 +896,7 @@ def load_or_train():
                 if val_r2 > best_val_r2:
                     best_val_r2 = val_r2
                     patience_counter = 0
-                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_enhanced.pt'))
+                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_optional.pt'))
                 else:
                     patience_counter += 1
                     if patience_counter >= PATIENCE:
@@ -906,8 +905,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_enhanced.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_enhanced.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_optional.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_optional.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -924,31 +923,32 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – Enhanced with 3 Golden Solutions
+# Streamlit UI – Specified Ranges with Optional Cost/Quality Solutions
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27-R2 Enhanced", layout="wide")
+st.set_page_config(page_title="Hubryd AI – Optional Solutions", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation – v29.27 (Enhanced)</h1>
-    <p style="color:#64ffda; margin:0;">25k samples · 256 neurons · NSGA-II Pop=80 · Gen=50</p>
+    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – Optional Cost & Quality Solutions</h1>
+    <p style="color:#64ffda; margin:0;">Balanced always shown · Cost & Quality on demand</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.18)")
-    st.markdown("""
-    ✅ Heckel: ln(1/(1-D)) = kP + A  
-    ✅ EFRF: ER / σt < 0.40  
-    ✅ Density: 0.40 ≤ D ≤ 0.97  
-    ✅ MCC: ≤ 8.0%  
-    ✅ Samples: 15000  
-    ✅ Epochs: 800  
-    ✅ **NSGA‑II: Pop=80, Gen=50**  
-    ✅ Network: 256 Neurons
+    st.markdown("### 📚 Physics Constraints (Specified Ranges)")
+    st.markdown(f"""
+    ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f} (realistic tablet range)  
+    ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
+    ✅ **EFRF:** &lt; 0.40 (feasibility) / explores up to 0.50  
+    ✅ **MCC:** ≤ {MCC_MAX:.1f}%  
+    ✅ **Pressure:** up to {PRESSURE_MAX:.0f} MPa  
+    ✅ **Samples:** 15000  
+    ✅ **Epochs:** 800  
+    ✅ **NSGA‑II:** Pop=80, Gen=50  
+    ✅ **Network:** 256 Neurons
     """)
-    st.caption("🔬 v29.27-R2 — Enhanced (80/50)")
+    st.caption("🔬 v29.27-R2 — Optional Solutions")
 
 # Load model
 try:
@@ -1038,19 +1038,19 @@ with col_right:
                 'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
             }
 
-            st.markdown("#### Constraints Status")
+            st.markdown("#### Constraints Status (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)")
             col_metrics = st.columns(4)
-            col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
-            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", "✅" if tensile >= TENSILE_MIN else "❌")
-            col_metrics[2].metric("EFRF", f"{efrf:.4f}", "✅" if efrf < EFRF_MAX else "❌")
-            col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", "✅" if mcc_n <= MCC_MAX else "❌")
+            col_metrics[0].metric("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]")
+            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
+            col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
+            col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ {MCC_MAX:.1f}%")
 
-            if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < EFRF_MAX, mcc_n <= MCC_MAX]):
+            if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40, mcc_n <= MCC_MAX]):
                 st.success("✅ All constraints satisfied!")
             else:
                 st.error("❌ Violates constraints")
 
-            # ========= NSGA-II with Pop=80, Gen=50 =========
+            # ========= NSGA-II =========
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -1081,7 +1081,7 @@ with col_right:
                     api_val = -objectives[idx, 0]
                     efrf_val = objectives[idx, 1]
                     norm_api = (max_api - api_val) / (max_api - 85) if max_api > 85 else 0
-                    norm_efrf = (efrf_val - min_efrf) / (EFRF_MAX - min_efrf) if EFRF_MAX > min_efrf else 0
+                    norm_efrf = (efrf_val - min_efrf) / (0.40 - min_efrf) if 0.40 > min_efrf else 0
                     dist = np.sqrt(norm_api**2 + norm_efrf**2)
                     if dist < best_dist:
                         best_dist = dist
@@ -1107,7 +1107,6 @@ with col_right:
                         best_cost_score = cost_score
                         cost_idx = idx
 
-                # Store solutions
                 st.session_state.balanced_solution = pop[balanced_idx] if balanced_idx is not None else None
                 st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
                 st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
@@ -1132,101 +1131,81 @@ with col_right:
         # ---- Pareto Front plot ----
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
-            st.markdown("### 📉 Pareto Front")
+            st.markdown("### 📉 Pareto Front (Specified Ranges)")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 num_solutions = len(fronts[0])
                 st.success(f"✅ Pareto front found: {num_solutions} optimal solutions (Pop={NSGA_POP}, Gen={NSGA_GENS})")
                 
-                # Create the basic plot without markers first
                 fig = plot_pareto_clean(objectives, fronts, None, None, None,
-                                        feasible_df, tested_point, EFRF_MAX)
-                # Now add markers for the 3 solutions using go.Figure directly
+                                        feasible_df, tested_point, efrf_max=0.40)
                 if fig is not None:
-                    # Add markers for the 3 solutions
-                    def add_solution_marker(sol, color, name, symbol='star'):
-                        if sol is not None:
-                            d, t, e, ef = predict_pinn(model, scaler, y_scaler, sol)
-                            fig.add_trace(go.Scatter(
-                                x=[sol[0]],
-                                y=[ef],
-                                mode='markers',
-                                name=name,
-                                marker=dict(size=12, color=color, symbol=symbol, line=dict(width=2, color='black')),
-                                hovertemplate=f'{name}<br>API: %{{x:.1f}}%<br>EFRF: %{{y:.4f}}<extra></extra>'
-                            ))
-                    add_solution_marker(balanced_solution, 'gold', '⭐ Balanced', 'star')
-                    add_solution_marker(quality_solution, 'blue', '🔵 Quality (Max σt)', 'circle')
-                    add_solution_marker(cost_solution, 'orange', '🟠 Cost (Max API, Min P)', 'diamond')
+                    # Add marker for balanced solution always
+                    if balanced_solution is not None:
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                        fig.add_trace(go.Scatter(
+                            x=[balanced_solution[0]],
+                            y=[ef],
+                            mode='markers',
+                            name='⭐ Balanced (always)',
+                            marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
+                            hovertemplate='Balanced<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                        ))
+                    # Optionally add cost and quality markers if toggled
+                    if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
+                        fig.add_trace(go.Scatter(
+                            x=[cost_solution[0]],
+                            y=[ef],
+                            mode='markers',
+                            name='💰 Cost-wise',
+                            marker=dict(size=10, color='orange', symbol='diamond', line=dict(width=2, color='black')),
+                            hovertemplate='Cost-wise<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                        ))
+                    if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
+                        fig.add_trace(go.Scatter(
+                            x=[quality_solution[0]],
+                            y=[ef],
+                            mode='markers',
+                            name='🏆 Quality-wise',
+                            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='black')),
+                            hovertemplate='Quality-wise<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                        ))
                     st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("No Pareto front found.")
 
-        # ---- Display 3 Golden Solutions in columns ----
-        st.markdown("### ⭐ Golden Solutions (3 options)")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("#### 🟡 Balanced (Default)")
-            if balanced_solution is not None:
-                d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
-                st.write(f"**API:** {balanced_solution[0]:.1f}%")
-                st.write(f"**MCC:** {balanced_solution[1]:.1f}%")
-                st.write(f"**PVPP:** {balanced_solution[2]:.1f}%")
-                st.write(f"**Mg-St:** {balanced_solution[3]:.2f}%")
-                st.write(f"**Binder:** {balanced_solution[4]:.1f}%")
-                st.write(f"**Pressure:** {balanced_solution[5]:.1f} MPa")
-                st.write(f"**Speed:** {balanced_solution[6]:.1f} rpm")
-                st.write(f"**Granule:** {balanced_solution[7]:.0f} µm")
-                st.write(f"**Density:** {d:.3f}")
-                st.write(f"**Tensile:** {t:.3f} MPa")
-                st.write(f"**EFRF:** {ef:.4f}")
-                # Store for report
-                st.session_state.balanced_pred = (d, t, e, ef)
-            else:
-                st.info("No balanced solution found.")
+        # ---- Always show the Balanced (Golden) solution ----
+        st.markdown("### ⭐ Golden Solution (Balanced – Always Shown)")
+        if balanced_solution is not None:
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Formulation:**")
+                st.write(f"API: {balanced_solution[0]:.1f}%")
+                st.write(f"MCC: {balanced_solution[1]:.1f}%")
+                st.write(f"PVPP: {balanced_solution[2]:.1f}%")
+                st.write(f"Mg-St: {balanced_solution[3]:.2f}%")
+                st.write(f"Binder: {balanced_solution[4]:.1f}%")
+            with col2:
+                st.write("**Process & CQAs:**")
+                st.write(f"Pressure: {balanced_solution[5]:.1f} MPa")
+                st.write(f"Speed: {balanced_solution[6]:.1f} rpm")
+                st.write(f"Granule: {balanced_solution[7]:.0f} µm")
+                st.write(f"Density: {d:.3f}")
+                st.write(f"Tensile: {t:.3f} MPa")
+                st.write(f"EFRF: {ef:.4f}")
+            st.session_state.balanced_pred = (d, t, e, ef)
+        else:
+            st.info("No balanced solution found.")
 
-        with col2:
-            st.markdown("#### 🔵 Quality (Max σt)")
-            if quality_solution is not None:
-                d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
-                st.write(f"**API:** {quality_solution[0]:.1f}%")
-                st.write(f"**MCC:** {quality_solution[1]:.1f}%")
-                st.write(f"**PVPP:** {quality_solution[2]:.1f}%")
-                st.write(f"**Mg-St:** {quality_solution[3]:.2f}%")
-                st.write(f"**Binder:** {quality_solution[4]:.1f}%")
-                st.write(f"**Pressure:** {quality_solution[5]:.1f} MPa")
-                st.write(f"**Speed:** {quality_solution[6]:.1f} rpm")
-                st.write(f"**Granule:** {quality_solution[7]:.0f} µm")
-                st.write(f"**Density:** {d:.3f}")
-                st.write(f"**Tensile:** {t:.3f} MPa")
-                st.write(f"**EFRF:** {ef:.4f}")
-                st.session_state.quality_pred = (d, t, e, ef)
-            else:
-                st.info("No quality solution found.")
+        # ---- Optional: Cost-wise and Quality-wise (shown only if toggled) ----
+        # We'll display them after the balanced solution.
+        # They are controlled by knobs, which are in the knob row below.
+        # We'll show them here if toggled.
 
-        with col3:
-            st.markdown("#### 🟠 Cost (Max API, Min P)")
-            if cost_solution is not None:
-                d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
-                st.write(f"**API:** {cost_solution[0]:.1f}%")
-                st.write(f"**MCC:** {cost_solution[1]:.1f}%")
-                st.write(f"**PVPP:** {cost_solution[2]:.1f}%")
-                st.write(f"**Mg-St:** {cost_solution[3]:.2f}%")
-                st.write(f"**Binder:** {cost_solution[4]:.1f}%")
-                st.write(f"**Pressure:** {cost_solution[5]:.1f} MPa")
-                st.write(f"**Speed:** {cost_solution[6]:.1f} rpm")
-                st.write(f"**Granule:** {cost_solution[7]:.0f} µm")
-                st.write(f"**Density:** {d:.3f}")
-                st.write(f"**Tensile:** {t:.3f} MPa")
-                st.write(f"**EFRF:** {ef:.4f}")
-                st.session_state.cost_pred = (d, t, e, ef)
-            else:
-                st.info("No cost solution found.")
-
-        # ---- Knobs ----
+        # ---- Knobs Row (with new toggles) ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional sections:**")
-        knob_cols = st.columns(5)
+        knob_cols = st.columns(7)
         with knob_cols[0]:
             show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
                                     key="knob_pareto")
@@ -1244,14 +1223,65 @@ with col_right:
                                       key="knob_particle_plot")
             st.session_state.show_particle_plot = show_particle
         with knob_cols[4]:
+            show_cost = st.toggle("💰 Cost-wise", value=st.session_state.get('show_cost_solution', False),
+                                  key="knob_cost")
+            st.session_state.show_cost_solution = show_cost
+        with knob_cols[5]:
+            show_quality = st.toggle("🏆 Quality-wise", value=st.session_state.get('show_quality_solution', False),
+                                     key="knob_quality")
+            st.session_state.show_quality_solution = show_quality
+        with knob_cols[6]:
             generate_report_btn = st.button("📄 Report", key="knob_report")
+
+        # ---- Display optional solutions based on toggles ----
+        if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
+            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Formulation:**")
+                st.write(f"API: {cost_solution[0]:.1f}%")
+                st.write(f"MCC: {cost_solution[1]:.1f}%")
+                st.write(f"PVPP: {cost_solution[2]:.1f}%")
+                st.write(f"Mg-St: {cost_solution[3]:.2f}%")
+                st.write(f"Binder: {cost_solution[4]:.1f}%")
+            with col2:
+                st.write("**Process & CQAs:**")
+                st.write(f"Pressure: {cost_solution[5]:.1f} MPa")
+                st.write(f"Speed: {cost_solution[6]:.1f} rpm")
+                st.write(f"Granule: {cost_solution[7]:.0f} µm")
+                st.write(f"Density: {d:.3f}")
+                st.write(f"Tensile: {t:.3f} MPa")
+                st.write(f"EFRF: {ef:.4f}")
+            st.session_state.cost_pred = (d, t, e, ef)
+
+        if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
+            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength)")
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Formulation:**")
+                st.write(f"API: {quality_solution[0]:.1f}%")
+                st.write(f"MCC: {quality_solution[1]:.1f}%")
+                st.write(f"PVPP: {quality_solution[2]:.1f}%")
+                st.write(f"Mg-St: {quality_solution[3]:.2f}%")
+                st.write(f"Binder: {quality_solution[4]:.1f}%")
+            with col2:
+                st.write("**Process & CQAs:**")
+                st.write(f"Pressure: {quality_solution[5]:.1f} MPa")
+                st.write(f"Speed: {quality_solution[6]:.1f} rpm")
+                st.write(f"Granule: {quality_solution[7]:.0f} µm")
+                st.write(f"Density: {d:.3f}")
+                st.write(f"Tensile: {t:.3f} MPa")
+                st.write(f"EFRF: {ef:.4f}")
+            st.session_state.quality_pred = (d, t, e, ef)
 
         # ---- Sensitivity ----
         if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is not None:
                 st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
-                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, EFRF_MAX)
+                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
@@ -1259,7 +1289,7 @@ with col_right:
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
+                st.markdown("### 📊 Particle Size Effect with Pressure Variation (D: 0.70–0.99)")
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1367,9 +1397,9 @@ with col_right:
             else:
                 with open(filepath, "rb") as pdf_file:
                     st.download_button(
-                        label="📥 Download PDF Report",
+                        label="📥 Download PDF Report (All Solutions)",
                         data=pdf_file,
-                        file_name=f"hubryd_report_{timestamp[:10]}.pdf",
+                        file_name=f"hubryd_report_all_{timestamp[:10]}.pdf",
                         mime="application/pdf"
                     )
                 try:
