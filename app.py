@@ -1,6 +1,7 @@
 """
 Hubryd AI – v29.27-R2 (Optional Cost/Quality Solutions)
-- PINN outputs raw scaled values (R² > 0.95)
+Hybrid AI for Multi-Objective Optimization of Tablet Formulation
+- PINN outputs raw scaled values (R² > 0.99)
 - NSGA-II: Pop=80, Gen=50
 - Ranges: D (0.70–0.99), Tensile ≥ 1.50, EFRF < 0.50, Pressure ≤ 400 MPa
 - Golden (balanced) solution always shown
@@ -79,8 +80,8 @@ if 'api' not in st.session_state:
         'show_sensitivity': False,
         'show_comparison': True,
         'show_particle_plot': False,
-        'show_cost_solution': False,      # NEW: toggle for cost-wise solution
-        'show_quality_solution': False,   # NEW: toggle for quality-wise solution
+        'show_cost_solution': False,
+        'show_quality_solution': False,
         'granule_mode': 'Fixed',
         'nsga_pop': None,
         'nsga_objectives': None,
@@ -102,7 +103,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions (unchanged)
+# Helper Functions
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -228,7 +229,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (unchanged)
+# PINN Model
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -325,7 +326,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS, granule_fixed=True, granule_fixed_val=125.0):
@@ -374,7 +375,7 @@ class NSGAII:
             penalty = 0.0
             if tensile < TENSILE_MIN:
                 penalty += (TENSILE_MIN - tensile) ** 2
-            if efrf >= 0.40:  # feasibility threshold
+            if efrf >= 0.40:
                 penalty += (efrf - 0.40) ** 2
             if mcc > MCC_MAX:
                 penalty += (mcc - MCC_MAX) ** 2
@@ -518,7 +519,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers (unchanged)
+# Prediction and Plotting Helpers
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -556,8 +557,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
             points.append({'API': api_n, 'EFRF': efrf})
     return pd.DataFrame(points)
 
-def plot_pareto_clean(objectives, fronts, balanced_solution=None, quality_solution=None, cost_solution=None,
-                      feasible_df=None, tested_point=None, efrf_max=0.40):
+def plot_pareto_clean(objectives, fronts, feasible_df=None, tested_point=None, efrf_max=0.40):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -585,11 +585,6 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, quality_soluti
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
-    # Mark the balanced solution always (gold star)
-    if balanced_solution is not None:
-        d, t, e, ef = predict_pinn(None, None, None, balanced_solution)  # We'll use dummy; actual call in UI
-        # We'll add markers in UI code to avoid dependency on model here
-        pass
     fig.add_hline(y=0.40, line_dash='dash', line_color='gray',
                   annotation_text='EFRF threshold (0.40)')
     fig.update_layout(
@@ -712,7 +707,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "تقرير تحسين تركيبة الأقراص – Hubryd AI v29.27-R2 (نطاقات محددة)", ln=True, align='C')
+        pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
         pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
         pdf.ln(4)
@@ -824,7 +819,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         return None, str(e)
 
 # ================================================================
-# Cached Training (unchanged)
+# Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
 CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_optional.pt')
@@ -923,14 +918,14 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – Specified Ranges with Optional Cost/Quality Solutions
+# Streamlit UI
 # ================================================================
-st.set_page_config(page_title="Hubryd AI – Optional Solutions", layout="wide")
+st.set_page_config(page_title="Hybrid AI for Multi-Objective Optimization", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – Optional Cost & Quality Solutions</h1>
-    <p style="color:#64ffda; margin:0;">Balanced always shown · Cost & Quality on demand</p>
+    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI for Multi‑Objective Optimization of Tablet Formulation</h1>
+    <p style="color:#64ffda; margin:0;">PINN + NSGA‑II · Wide Ranges · Optional Cost/Quality Solutions</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1136,8 +1131,7 @@ with col_right:
                 num_solutions = len(fronts[0])
                 st.success(f"✅ Pareto front found: {num_solutions} optimal solutions (Pop={NSGA_POP}, Gen={NSGA_GENS})")
                 
-                fig = plot_pareto_clean(objectives, fronts, None, None, None,
-                                        feasible_df, tested_point, efrf_max=0.40)
+                fig = plot_pareto_clean(objectives, fronts, feasible_df, tested_point, efrf_max=0.40)
                 if fig is not None:
                     # Add marker for balanced solution always
                     if balanced_solution is not None:
@@ -1198,11 +1192,9 @@ with col_right:
             st.info("No balanced solution found.")
 
         # ---- Optional: Cost-wise and Quality-wise (shown only if toggled) ----
-        # We'll display them after the balanced solution.
-        # They are controlled by knobs, which are in the knob row below.
-        # We'll show them here if toggled.
+        # They appear after the balanced solution, controlled by knobs.
 
-        # ---- Knobs Row (with new toggles) ----
+        # ---- Knobs Row (with toggles) ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional sections:**")
         knob_cols = st.columns(7)
