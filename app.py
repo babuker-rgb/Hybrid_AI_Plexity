@@ -1,10 +1,6 @@
 """
-Hubryd AI – v29.27-R28 (FULL – Safe Array Operations)
-Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- All parameters restored
-- Safe array operations (no if statements on arrays)
-- All advanced features included
-- Guaranteed to run without array ambiguity
+Hubryd AI – v29.27-R28-fix (Broadcasting Fix)
+Full Pharmaceutical PINN – Fixed inverse_transform shape mismatch
 Nile Valley University · Sudan
 """
 
@@ -152,7 +148,6 @@ if 'api' not in st.session_state:
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    """Vectorised normalisation – safe with arrays."""
     api = np.asarray(api, dtype=float)
     binder = np.asarray(binder, dtype=float)
     pvpp = np.asarray(pvpp, dtype=float)
@@ -198,7 +193,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     return api, binder, pvpp, mgst, mcc
 
 def add_interaction_features(X_raw):
-    """Vectorised feature engineering – safe with arrays."""
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -243,7 +237,6 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
-    """Calculate dwell time from speed – vectorised."""
     if np.isscalar(speed_rpm):
         speed_rpm = np.array([speed_rpm])
     speed_rpm = np.asarray(speed_rpm)
@@ -254,7 +247,6 @@ def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     return result
 
 def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture):
-    """Safe vectorised disintegration time prediction."""
     tensile = np.asarray(tensile)
     pvpp_n = np.asarray(pvpp_n)
     api_n = np.asarray(api_n)
@@ -270,7 +262,6 @@ def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture):
     return np.clip(time, 1.0, 30.0)
 
 def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    """Safe vectorised dissolution profile prediction."""
     api_n = np.asarray(api_n)
     pvpp_n = np.asarray(pvpp_n)
     particle_size = np.asarray(particle_size)
@@ -283,13 +274,12 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – FULLY VECTORISED, NO ARRAY CONDITIONS
+# DATA GENERATION – FULLY VECTORISED
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
 
-    # Generate all inputs using numpy (vectorised)
     api_raw = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
     binder_raw = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
     pvpp_raw = rng.uniform(SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, n_samples)
@@ -305,12 +295,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     decompression_time_raw = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, n_samples)
     granule_raw = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, n_samples)
 
-    # Normalise components
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw
     )
 
-    # Build feature matrix (14 features)
     X = np.column_stack([
         api_n, mcc_n, pvpp_n, mgst_n, binder_n,
         pressure_raw, speed_raw, granule_raw,
@@ -318,7 +306,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # --- Density (Heckel – direct calculation, no conditions) ---
+    # Density (Heckel)
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k * pressure_raw + A
@@ -327,7 +315,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # --- Tensile strength ---
+    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -348,7 +336,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     strength *= rng.normal(1.0, 0.01, n_samples)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # --- Elastic Recovery ---
+    # Elastic Recovery
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0 +
@@ -357,7 +345,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
-    # --- Disintegration and dissolution ---
+    # Disintegration & dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_raw)
     dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
 
@@ -409,7 +397,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 8)
+        self.output = nn.Linear(hidden//2, 8)  # density, tensile, er, k, A, disintegration, tau, beta
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -554,8 +542,9 @@ class NSGAII:
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
-            pred_scaled = self.model.predict(X_t)
-            pred = self.y_scaler.inverse_transform(pred_scaled)
+            pred_scaled = self.model.predict(X_t)       # shape (n, 8)
+            # Slice to first 6 for inverse_transform
+            pred = self.y_scaler.inverse_transform(pred_scaled[:, :6])
 
         density = np.clip(pred[:, 0], D_MIN, D_MAX)
         tensile = np.maximum(pred[:, 1], 1e-4)
@@ -738,8 +727,8 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         scaled = scaler.transform([aug])
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
-            pred_scaled = model.predict(X_t)[0]
-        pred = y_scaler.inverse_transform([pred_scaled])[0]
+            pred_scaled = model.predict(X_t)[0]     # shape (8,)
+            pred = y_scaler.inverse_transform([pred_scaled[:6]])[0]   # shape (6,)
         density = np.clip(pred[0], D_MIN, D_MAX)
         tensile = max(pred[1], 1e-4)
         er = max(pred[2], 1e-4)
@@ -908,7 +897,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r28_full_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r28_fixed_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -969,8 +958,9 @@ def load_or_train():
 
         model.eval()
         with torch.no_grad():
-            val_pred_scaled = model.predict(X_val_t)
-            val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]
+            val_pred_scaled = model.predict(X_val_t)          # shape (n, 8)
+            # Slice to first 6 for inverse_transform
+            val_pred = y_scaler.inverse_transform(val_pred_scaled[:, :6])[:, 1]   # tensile
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
             val_r2 = r2_score(val_true, val_pred)
 
@@ -1027,7 +1017,8 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     with torch.no_grad():
         pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
         pinn_pred_scaled = model.predict(pinn_input)
-        pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+        # Slice to first 6 for inverse_transform
+        pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled[:, :6])[:, 1]
 
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
@@ -1115,8 +1106,8 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     scaled = scaler.transform(aug)
     X_t = torch.tensor(scaled, dtype=torch.float32)
     with torch.no_grad():
-        pred_scaled = model.predict(X_t)
-        pred = y_scaler.inverse_transform(pred_scaled)
+        pred_scaled = model.predict(X_t)                # shape (n, 8)
+        pred = y_scaler.inverse_transform(pred_scaled[:, :6])   # shape (n, 6)
     density = np.clip(pred[:, 0], D_MIN, D_MAX)
     tensile = np.maximum(pred[:, 1], 1e-4)
     er = np.maximum(pred[:, 2], 1e-4)
@@ -1139,9 +1130,9 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Full Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R28 (FULL MODEL)</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R28-fix</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
-    <p style="color:#8899aa; font-size:0.75rem;">All Parameters · Advanced Compaction Models · Safe Array Operations</p>
+    <p style="color:#8899aa; font-size:0.75rem;">All Parameters · Safe Array Operations · Fixed Broadcasting</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1161,7 +1152,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R28 — Full Model")
+    st.caption("🔬 v29.27-R28-fix")
 
 # Load model
 try:
