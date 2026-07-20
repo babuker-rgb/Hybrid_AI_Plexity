@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Unified Table + Moisture in Formulation)
+Hubryd AI – v29.27-R31 (Final Kawakita Fix)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -42,7 +42,7 @@ TENSILE_MIN = 1.50
 EFRF_MAX = 0.50
 DISINTEGRATION_MAX = 15.0
 
-# Slider ranges (now moisture is part of formulation)
+# Slider ranges (moisture is now a formulation component)
 SLIDER_API_MIN = 80.0
 SLIDER_API_MAX = 98.0
 SLIDER_MCC_MIN = 1.5
@@ -72,7 +72,7 @@ SLIDER_FRICTION_MAX = 0.5
 SLIDER_DECOMPRESSION_TIME_MIN = 10.0
 SLIDER_DECOMPRESSION_TIME_MAX = 80.0
 SLIDER_PARTICLE_SIZE_MIN = 10.0
-SLIDER_PARTICLE_SIZE_MAX = 200.0  # Particle size is kept as a separate property (not in sum)
+SLIDER_PARTICLE_SIZE_MAX = 200.0
 
 # NSGA-II bounds
 BOUND_MCC_MIN = 2.0
@@ -178,7 +178,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     mcc = (mcc / total) * 100.0
     moisture = (moisture / total) * 100.0
 
-    # Re-clip to enforce bounds (may slightly change sum, but we re-normalise again)
+    # Re-clip
     api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
     binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
     pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
@@ -289,7 +289,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – CORRECTED KAWAKITA & MOISTURE AS COMPONENT
+# DATA GENERATION – FINAL KAWAKITA FIX
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -325,7 +325,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (corrected) -----
+    # ----- Density: Hybrid Heckel + Kawakita (FINAL CORRECTION) -----
     # Heckel model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
@@ -333,13 +333,16 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (corrected parameters)
-    a_kawakita = 0.88 + 0.0002 * (pressure_raw - 150)   # 0.88 ~ 0.90
-    b_kawakita = 0.005 + 0.003 * binder_n               # ~0.0092 ~ 0.023
+    # Kawakita model (CORRECTED: b is very small so 1/b is large, yielding realistic densities)
+    # a ranges 0.85 ~ 0.90
+    a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)
+    # b ranges ~0.00128 ~ 0.0022, so 1/b ranges ~454 ~ 781
+    b_kawakita = 0.001 + 0.0002 * binder_n
+    # D = 1 - P / (a*P + 1/b)
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
-    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
+    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)  # Now rarely needs clipping
 
-    # Weighted average (Heckel dominant at high pressure)
+    # Weighted average (Heckel dominant at high pressure, Kawakita at low)
     pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
     w_heckel = pressure_norm
     w_kawakita = 1.0 - pressure_norm
@@ -348,7 +351,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile
+    # Tensile (unchanged)
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -378,7 +381,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
-    # Disintegration & dissolution (now using moisture_n)
+    # Disintegration & dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_n)
     disintegration += rng.normal(0, 0.1, n_samples)
     disintegration = np.clip(disintegration, 1.0, 30.0)
@@ -405,7 +408,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL – INDEPENDENT HECKEL & KAWAKITA
+# PINN MODEL (no changes needed)
 # ================================================================
 
 class Mish(nn.Module):
@@ -436,9 +439,6 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        # Output: [density, tensile, er,
-        #          k_heckel, A_heckel, a_kawakita, b_kawakita,
-        #          disintegration, dissolution_tau, dissolution_beta]
         self.output = nn.Linear(hidden//2, 10)
 
     def forward(self, X):
@@ -451,7 +451,6 @@ class MultiTaskPINN(nn.Module):
         density = raw[:, 0:1]
         tensile = raw[:, 1:2]
         er = raw[:, 2:3]
-        # All physical parameters forced positive via softplus
         k_heckel = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
         A_heckel = torch.nn.functional.softplus(raw[:, 4:5]) + 1e-4
         a_kawakita = torch.nn.functional.softplus(raw[:, 5:6]) + 1e-4
@@ -465,7 +464,6 @@ class MultiTaskPINN(nn.Module):
                           disintegration, dissolution_tau, dissolution_beta], dim=1)
 
     def predict(self, X_scaled):
-        """Return [density, tensile, er, disintegration, tau, beta] (order for y_scaler)."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -496,7 +494,7 @@ class MultiTaskPINN(nn.Module):
         dissolution_tau_pred = y_pred[:, 8:9]
         dissolution_beta_pred = y_pred[:, 9:10]
 
-        # Data loss (6 targets)
+        # Data loss
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
@@ -507,7 +505,7 @@ class MultiTaskPINN(nn.Module):
         data_loss = (W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er +
                      W_DISINTEGRATION * loss_disin + W_DISSOLUTION * (loss_tau + loss_beta))
 
-        # Physics losses (using real values)
+        # Physics losses
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -528,11 +526,11 @@ class MultiTaskPINN(nn.Module):
         kawakita_rhs = a_kawakita_pred * pressure + 1.0 / b_kawakita_pred
         kawakita_loss = nn.MSELoss()(kawakita_lhs, kawakita_rhs)
 
-        # 3. EFRF penalty
+        # 3. EFRF
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
 
-        # 4. Disintegration physics (using moisture)
+        # 4. Disintegration
         disin_physics = (2.0 + 0.5 * tensile_real -
                          5.0 * torch.exp(-0.5 * pvpp) +
                          0.1 * (api - 80) +
@@ -541,7 +539,7 @@ class MultiTaskPINN(nn.Module):
         disin_physics = torch.clamp(disin_physics, 1.0, 30.0)
         physics_disin_loss = nn.MSELoss()(disintegration_pred, disin_physics)
 
-        # 5. Dissolution physics
+        # 5. Dissolution
         tau_physics = 5.0 + 0.5 * disintegration_pred - 0.1 * pvpp + 0.05 * (api - 80)
         tau_physics = torch.clamp(tau_physics, 2.0, 20.0)
         physics_tau_loss = nn.MSELoss()(dissolution_tau_pred, tau_physics)
@@ -560,7 +558,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged except now uses model.predict properly)
+# NSGA-II (unchanged)
 # ================================================================
 
 class NSGAII:
@@ -577,7 +575,6 @@ class NSGAII:
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
-        # Normalise components including moisture
         api, binder, pvpp, mgst, mcc, moisture = normalize_components(
             api, binder, pvpp, mgst, mcc, moisture
         )
@@ -602,7 +599,6 @@ class NSGAII:
         particle_size = pop[:, 8]; moisture = pop[:, 9]; binder_grade = pop[:, 10]
         dwell_time = pop[:, 11]; friction = pop[:, 12]; decompression_time = pop[:, 13]
 
-        # Normalise components including moisture
         api, binder, pvpp, mgst, mcc, moisture = normalize_components(
             api, binder, pvpp, mgst, mcc, moisture
         )
@@ -799,7 +795,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# PREDICTION AND PLOTTING (UPDATED)
+# PREDICTION AND PLOTTING
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -988,7 +984,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# PDF REPORT (unchanged, but we will use the new table data)
+# PDF REPORT
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
@@ -1097,7 +1093,7 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_unified.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1116,7 +1112,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training corrected Kawakita model with moisture in formulation (15k samples)...")
+    st.caption("🔄 Training FINAL corrected Kawakita model (15k samples)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1159,7 +1155,7 @@ def load_or_train():
         model.eval()
         with torch.no_grad():
             val_pred_scaled = model.predict(X_val_t)
-            val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]  # tensile
+            val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
             val_r2 = r2_score(val_true, val_pred)
 
@@ -1169,7 +1165,7 @@ def load_or_train():
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_unified.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1178,8 +1174,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_unified.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_unified.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -1216,7 +1212,7 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     with torch.no_grad():
         pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
         pinn_pred_scaled = model.predict(pinn_input)
-        pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # tensile
+        pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
 
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
@@ -1350,7 +1346,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R31 — Unified Table + Moisture in Formulation")
+    st.caption("🔬 v29.27-R31 — Final Kawakita Fix + Unified Table")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1681,7 +1677,7 @@ with col_right:
                     "Disintegration (min)": st.column_config.NumberColumn("Disintegration (min)", format="%.1f", width="small"),
                 }
             )
-            st.caption("⚖️ Balanced = Trade-off between API & EFRF | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
+            st.caption("⚖️ Balanced Golden Solution = Trade-off between API & EFRF | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
         else:
             st.info("No optimal solutions available to display.")
 
