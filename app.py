@@ -277,7 +277,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – WITH KAWAKITA (NEW)
+# DATA GENERATION – WITH KAWAKITA
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -309,7 +309,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (NEW) -----
+    # ----- Density: Hybrid Heckel + Kawakita -----
     # Heckel model
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
@@ -320,7 +320,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     # Kawakita model (better for low pressures)
     a = 0.5 + 0.01 * (pressure_raw - 150) / 50
     b = 0.8 + 0.02 * binder_n
-    epsilon = 1.0 - D_MIN
     D_kawakita = 1 - (pressure_raw / (a * pressure_raw + 1/b))
     D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
     
@@ -390,7 +389,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL – WITH KAWAKITA PHYSICS LOSS (NEW)
+# PINN MODEL – WITH KAWAKITA PHYSICS LOSS
 # ================================================================
 
 class Mish(nn.Module):
@@ -492,7 +491,7 @@ class MultiTaskPINN(nn.Module):
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # 2. Kawakita physics (NEW)
+        # 2. Kawakita physics
         epsilon = 1.0 - density_real
         epsilon = torch.clamp(epsilon, min=1e-4)
         kawakita_lhs = pressure / epsilon
@@ -530,7 +529,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -768,7 +767,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# PREDICTION AND PLOTTING (UPDATED FOR PDF)
+# PREDICTION AND PLOTTING
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -945,7 +944,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# PDF REPORT – ENHANCED (NEW)
+# PDF REPORT – ENHANCED
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
@@ -1279,13 +1278,14 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
 
 # ================================================================
-# MAIN UI – SIMPLIFIED HEADER
+# MAIN UI – SIMPLIFIED HEADER WITH VERSION
 # ================================================================
 
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI For Multi‑Objective Tablet Optimization</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Nile Valley University, Sudan</p>
+    <p style="color:#64ffda; margin:0; font-size:1rem;">v29.27-R31</p>
+    <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1307,7 +1307,7 @@ with st.sidebar:
     """)
     st.caption("🔬 v29.27-R31 — Enhanced with Kawakita & Experimental Data")
 
-# ---- NEW: Experimental Data Upload ----
+# ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📁 Experimental Data")
 uploaded_file = st.sidebar.file_uploader("Upload CSV with experimental results", type=["csv"])
@@ -1609,7 +1609,6 @@ with col_right:
             st.markdown("### 🧪 Comparison with Experimental Data")
             exp_df = st.session_state.experimental_data
             st.dataframe(exp_df)
-            # You can add more sophisticated comparison logic here
 
         generate_report_btn = st.button("📄 Generate Enhanced Report (PDF)", key="knob_report")
         if generate_report_btn and st.session_state.benchmark_df is not None:
