@@ -1,6 +1,6 @@
 """
-Hubryd AI – v29.27-R28-fix (Broadcasting Fix)
-Full Pharmaceutical PINN – Fixed inverse_transform shape mismatch
+Hubryd AI – v29.27-R29 (Fixed Indexing)
+Full Pharmaceutical PINN – Corrected inverse_transform indices
 Nile Valley University · Sudan
 """
 
@@ -546,13 +546,16 @@ class NSGAII:
             # Slice to first 6 for inverse_transform
             pred = self.y_scaler.inverse_transform(pred_scaled[:, :6])
 
+        # Correct indices after inverse_transform:
+        # 0: density, 1: tensile, 2: er, 3: disintegration, 4: dissolution_tau, 5: dissolution_beta
         density = np.clip(pred[:, 0], D_MIN, D_MAX)
         tensile = np.maximum(pred[:, 1], 1e-4)
         er = np.maximum(pred[:, 2], 1e-4)
         efrf = er / tensile
         efrf = np.clip(efrf, 1e-4, 5.0)
-        disintegration = np.maximum(pred[:, 5], 0.5)
-        dissolution_tau = np.maximum(pred[:, 6], 1.0)
+        disintegration = np.maximum(pred[:, 3], 0.5)
+        dissolution_tau = np.maximum(pred[:, 4], 1.0)
+        dissolution_beta = np.maximum(pred[:, 5], 0.5)
 
         g1 = D_MIN - density
         g2 = density - D_MAX
@@ -729,13 +732,14 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         with torch.no_grad():
             pred_scaled = model.predict(X_t)[0]     # shape (8,)
             pred = y_scaler.inverse_transform([pred_scaled[:6]])[0]   # shape (6,)
+        # Indices: 0:density, 1:tensile, 2:er, 3:disintegration, 4:tau, 5:beta
         density = np.clip(pred[0], D_MIN, D_MAX)
         tensile = max(pred[1], 1e-4)
         er = max(pred[2], 1e-4)
         efrf = er / tensile
-        disintegration = max(pred[5], 0.5)
-        dissolution_tau = max(pred[6], 1.0)
-        dissolution_beta = max(pred[7], 0.5)
+        disintegration = max(pred[3], 0.5)
+        dissolution_tau = max(pred[4], 1.0)
+        dissolution_beta = max(pred[5], 0.5)
         return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
     except Exception as e:
         st.error(f"Prediction error: {e}")
@@ -897,7 +901,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r28_fixed_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r29_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -959,7 +963,6 @@ def load_or_train():
         model.eval()
         with torch.no_grad():
             val_pred_scaled = model.predict(X_val_t)          # shape (n, 8)
-            # Slice to first 6 for inverse_transform
             val_pred = y_scaler.inverse_transform(val_pred_scaled[:, :6])[:, 1]   # tensile
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
             val_r2 = r2_score(val_true, val_pred)
@@ -1108,12 +1111,13 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     with torch.no_grad():
         pred_scaled = model.predict(X_t)                # shape (n, 8)
         pred = y_scaler.inverse_transform(pred_scaled[:, :6])   # shape (n, 6)
+    # Indices: 0:density, 1:tensile, 2:er, 3:disintegration, 4:tau, 5:beta
     density = np.clip(pred[:, 0], D_MIN, D_MAX)
     tensile = np.maximum(pred[:, 1], 1e-4)
     er = np.maximum(pred[:, 2], 1e-4)
     efrf = er / tensile
     efrf = np.clip(efrf, 1e-4, 5.0)
-    disintegration = np.maximum(pred[:, 5], 0.5)
+    disintegration = np.maximum(pred[:, 3], 0.5)
 
     mask = ((D_MIN <= density) & (density <= D_MAX) &
             (tensile >= TENSILE_MIN) & (efrf < 0.40) &
@@ -1130,9 +1134,9 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Full Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R28-fix</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R29 (Fixed Indexing)</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
-    <p style="color:#8899aa; font-size:0.75rem;">All Parameters · Safe Array Operations · Fixed Broadcasting</p>
+    <p style="color:#8899aa; font-size:0.75rem;">All Parameters · Safe Array Operations · Corrected Output Indices</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1152,7 +1156,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R28-fix")
+    st.caption("🔬 v29.27-R29")
 
 # Load model
 try:
