@@ -277,7 +277,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – WITH KAWAKITA (unchanged, uses independent parameters)
+# DATA GENERATION – WITH KAWAKITA (independent parameters)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -420,7 +420,8 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        # Output: [density, tensile, er, k_heckel, A_heckel, a_kawakita, b_kawakita,
+        # Output: [density, tensile, er,
+        #          k_heckel, A_heckel, a_kawakita, b_kawakita,
         #          disintegration, dissolution_tau, dissolution_beta]
         self.output = nn.Linear(hidden//2, 10)
 
@@ -443,8 +444,8 @@ class MultiTaskPINN(nn.Module):
         dissolution_tau = torch.nn.functional.softplus(raw[:, 8:9])
         dissolution_beta = torch.nn.functional.softplus(raw[:, 9:10]) + 1e-4
 
-        return torch.cat([density, tensile, er, k_heckel, A_heckel,
-                          a_kawakita, b_kawakita,
+        return torch.cat([density, tensile, er,
+                          k_heckel, A_heckel, a_kawakita, b_kawakita,
                           disintegration, dissolution_tau, dissolution_beta], dim=1)
 
     def predict(self, X_scaled):
@@ -547,7 +548,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged, but uses model.predict which now returns correct order)
+# NSGA-II (uses model.predict which now returns correct order)
 # ================================================================
 
 class NSGAII:
@@ -786,7 +787,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# PREDICTION AND PLOTTING (updated for new predict output order)
+# PREDICTION AND PLOTTING (UPDATED)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -797,7 +798,6 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         scaled = scaler.transform([aug])
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
-            # model.predict returns [density, tensile, er, disintegration, tau, beta]
             pred_scaled = model.predict(X_t)[0]
             pred = y_scaler.inverse_transform([pred_scaled])[0]
         density = np.clip(pred[0], D_MIN, D_MAX)
@@ -812,21 +812,295 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
-# The plotting functions (plot_pareto_clean, plot_sensitivity_bars, plot_dissolution_profile)
-# remain unchanged as they only use the predictions already computed.
+def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
+                      tested_point=None, efrf_max=0.40):
+    """
+    رسم جبهة باريتو مع منطقة الحلول الممكنة.
+    """
+    # التحقق من صحة المدخلات
+    if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+        st.warning("لا توجد حلول على جبهة باريتو.")
+        return None
+    if objectives is None or objectives.shape[0] == 0:
+        st.warning("لا توجد أهداف لعرضها.")
+        return None
+
+    front = fronts[0]
+    try:
+        api_vals = -objectives[front, 0]
+        efrf_vals = objectives[front, 1]
+    except Exception as e:
+        st.error(f"خطأ في استخراج البيانات من الأهداف: {e}")
+        return None
+
+    df_front = pd.DataFrame({'API': api_vals, 'EFRF': efrf_vals}).sort_values('API')
+    fig = go.Figure()
+
+    # منطقة الحلول الممكنة
+    if feasible_df is not None and not feasible_df.empty:
+        fig.add_trace(go.Scatter(
+            x=feasible_df['API'],
+            y=feasible_df['EFRF'],
+            mode='markers',
+            name='Feasible Region (EFRF<0.40)',
+            marker=dict(color='lightgreen', size=4, opacity=0.4),
+            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>',
+            showlegend=True
+        ))
+
+    # جبهة باريتو
+    fig.add_trace(go.Scatter(
+        x=df_front['API'],
+        y=df_front['EFRF'],
+        mode='lines+markers',
+        name='Pareto Front',
+        line=dict(color='red', width=2),
+        marker=dict(size=7, color='red'),
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+    ))
+
+    # النقطة المختبرة (تركيبة المستخدم)
+    if tested_point is not None:
+        fig.add_trace(go.Scatter(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=10, color='blue', symbol='circle',
+                        line=dict(width=2, color='darkblue')),
+            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+        ))
+
+    # الحل المتوازن (الذهبي) إذا وُجد
+    if balanced_solution is not None:
+        try:
+            # إذا كان balanced_solution قائمة أو مصفوفة تحتوي على (API, EFRF)
+            if isinstance(balanced_solution, (list, tuple, np.ndarray)) and len(balanced_solution) >= 2:
+                api_bal = balanced_solution[0]
+                efrf_bal = balanced_solution[1]
+                fig.add_trace(go.Scatter(
+                    x=[api_bal],
+                    y=[efrf_bal],
+                    mode='markers',
+                    name='⭐ Golden (Balanced)',
+                    marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
+                    hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+                ))
+        except:
+            pass
+
+    # خط العتبة
+    fig.add_hline(y=0.40, line_dash='dash', line_color='gray',
+                  annotation_text='EFRF threshold (0.40)')
+
+    fig.update_layout(
+        title='Pareto Front with Feasible Region',
+        xaxis_title='API (%)',
+        yaxis_title='EFRF',
+        height=450,
+        template='plotly_white',
+        legend=dict(x=0.8, y=0.95)
+    )
+    return fig
+
+def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
+    if model is None or formulation is None:
+        return None
+    api0 = formulation['api_n']; mcc0 = formulation['mcc_n']
+    pvpp0 = formulation['pvpp_n']; mgst0 = formulation['mgst_n']
+    binder0 = formulation['binder_n']; press0 = formulation['pressure']
+    speed0 = formulation['speed']; granule0 = formulation['granule_use']
+    particle_size0 = formulation['particle_size']
+    moisture0 = formulation['moisture']
+    dwell_time0 = formulation['dwell_time']
+    friction0 = formulation['friction']
+    decompression_time0 = formulation['decompression_time']
+
+    param_defs = [
+        {'name': 'API', 'current': api0, 'min': SLIDER_API_MIN, 'max': SLIDER_API_MAX},
+        {'name': 'MCC', 'current': mcc0, 'min': SLIDER_MCC_MIN, 'max': SLIDER_MCC_MAX},
+        {'name': 'PVPP', 'current': pvpp0, 'min': SLIDER_PVPP_MIN, 'max': SLIDER_PVPP_MAX},
+        {'name': 'MgSt', 'current': mgst0, 'min': SLIDER_MGST_MIN, 'max': SLIDER_MGST_MAX},
+        {'name': 'Binder', 'current': binder0, 'min': SLIDER_BINDER_MIN, 'max': SLIDER_BINDER_MAX},
+        {'name': 'Pressure', 'current': press0, 'min': BOUND_PRESSURE_MIN, 'max': BOUND_PRESSURE_MAX},
+        {'name': 'Speed', 'current': speed0, 'min': BOUND_SPEED_MIN, 'max': BOUND_SPEED_MAX},
+        {'name': 'Granule', 'current': granule0, 'min': BOUND_GRANULE_MIN, 'max': BOUND_GRANULE_MAX},
+        {'name': 'ParticleSize', 'current': particle_size0, 'min': SLIDER_PARTICLE_SIZE_MIN, 'max': SLIDER_PARTICLE_SIZE_MAX},
+        {'name': 'Moisture', 'current': moisture0, 'min': SLIDER_MOISTURE_MIN, 'max': SLIDER_MOISTURE_MAX},
+        {'name': 'DwellTime', 'current': dwell_time0, 'min': SLIDER_DWELL_TIME_MIN, 'max': SLIDER_DWELL_TIME_MAX},
+        {'name': 'Friction', 'current': friction0, 'min': SLIDER_FRICTION_MIN, 'max': SLIDER_FRICTION_MAX},
+        {'name': 'DecompTime', 'current': decompression_time0, 'min': SLIDER_DECOMPRESSION_TIME_MIN, 'max': SLIDER_DECOMPRESSION_TIME_MAX}
+    ]
+
+    base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0,
+                  particle_size0, moisture0, 0, dwell_time0, friction0, decompression_time0]
+    _, _, _, efrf_base, _, _, _ = predict_pinn(model, scaler, y_scaler, base_input)
+
+    sensitivities = []
+    for idx, p in enumerate(param_defs):
+        low_input = base_input.copy()
+        low_input[idx] = p['min']
+        high_input = base_input.copy()
+        high_input[idx] = p['max']
+        _, _, _, efrf_low, _, _, _ = predict_pinn(model, scaler, y_scaler, low_input)
+        _, _, _, efrf_high, _, _, _ = predict_pinn(model, scaler, y_scaler, high_input)
+        delta = abs(efrf_high - efrf_low)
+        sensitivities.append({
+            'Parameter': f"{p['name']}",
+            'Delta EFRF': delta
+        })
+
+    df_sens = pd.DataFrame(sensitivities).sort_values('Delta EFRF', ascending=True)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=df_sens['Parameter'],
+        x=df_sens['Delta EFRF'],
+        orientation='h',
+        marker_color='steelblue',
+        text=df_sens['Delta EFRF'].round(4),
+        textposition='outside',
+        hovertemplate='%{y}<br>ΔEFRF: %{x:.4f}<extra></extra>'
+    ))
+    fig.add_vline(x=0.40, line_dash='dash', line_color='red',
+                  annotation_text='EFRF threshold 0.40')
+    fig.update_layout(
+        title='Parameter Impact on EFRF',
+        xaxis_title='Absolute change in EFRF',
+        yaxis_title='Parameter',
+        height=500,
+        template='plotly_white'
+    )
+    return fig
+
+def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Profile"):
+    time_points = np.linspace(0, 60, 100)
+    dissolution = 100 * (1 - np.exp(-((time_points / tau) ** beta)))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=time_points,
+        y=dissolution,
+        mode='lines',
+        name=f'Q(t) = 100×(1-exp(-((t/{tau:.1f})^{beta:.2f})))',
+        line=dict(color='blue', width=2)
+    ))
+    fig.add_hline(y=85, line_dash='dash', line_color='red',
+                  annotation_text='85% dissolution target')
+    fig.update_layout(
+        title=f'{title} (API: {api_n:.1f}%)',
+        xaxis_title='Time (minutes)',
+        yaxis_title='% Dissolved',
+        height=350,
+        template='plotly_white'
+    )
+    return fig
 
 # ================================================================
-# PDF REPORT – ENHANCED (unchanged)
+# PDF REPORT – ENHANCED
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
                                  balanced_pred, quality_pred, cost_pred, fronts, timestamp,
                                  pareto_fig, sensitivity_fig, dissolution_fig):
-    # ... (identical to original, no changes needed)
-    pass  # For brevity, copy the original function here
+    if not FPDF_AVAILABLE:
+        return None, "fpdf2 is not installed. Please install it with: pip install fpdf2"
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
+        pdf.set_font("Arial", "I", 10)
+        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.ln(4)
+
+        f = formulation
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
+        pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Particle Size: {f['particle_size']:.0f} µm", ln=True)
+        pdf.cell(60, 6, f"Moisture: {f['moisture']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Binder Grade: {BINDER_GRADES[int(f['binder_grade'])]}", ln=True)
+        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", ln=True)
+        pdf.cell(60, 6, f"Dwell Time: {f['dwell_time']:.1f} ms", ln=True)
+        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density: {f['density']:.3f}", ln=True)
+        pdf.cell(60, 6, f"Tensile Strength: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", ln=True)
+        pdf.cell(60, 6, f"Elastic Recovery: {f['er']:.4f}", ln=True)
+        pdf.cell(60, 6, f"Disintegration: {f['disintegration']:.1f} min", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"Disintegration Status: {'PASS' if f['disintegration'] <= 15.0 else 'FAIL'}", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "4. Optimised Solutions (Pareto Front)", ln=True)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Golden Solution (Balanced)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if balanced_solution is not None and balanced_pred is not None:
+            pdf.cell(60, 6, f"API: {balanced_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {balanced_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {balanced_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"Disintegration: {balanced_pred[4]:.1f} min", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Quality-Optimised Solution (Max Tensile)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if quality_solution is not None and quality_pred is not None:
+            pdf.cell(60, 6, f"API: {quality_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {quality_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {quality_pred[1]:.3f} MPa", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Cost-Optimised Solution (Max API, Min Pressure)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if cost_solution is not None and cost_pred is not None:
+            pdf.cell(60, 6, f"API: {cost_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {cost_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {cost_pred[1]:.3f} MPa", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "5. Model Performance Comparison", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if bench_df is not None:
+            for _, row in bench_df.iterrows():
+                pdf.cell(0, 6, f"{row['Model']}: R2 = {row['R2 (Test)']} | RMSE = {row['RMSE (MPa)']} | MAE = {row['MAE (MPa)']}", ln=True)
+        pdf.ln(4)
+
+        if fronts is not None and len(fronts) > 0:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary", ln=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            return tmp.name, None
+    except Exception as e:
+        return None, str(e)
 
 # ================================================================
-# MODEL TRAINING (adapted to new model output)
+# MODEL TRAINING
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
@@ -930,7 +1204,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# MODEL COMPARISON (updated for predict order)
+# MODEL COMPARISON
 # ================================================================
 
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
@@ -1006,7 +1280,7 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     return bench_df, chart_data
 
 # ================================================================
-# generate_feasible_points (updated)
+# generate_feasible_points
 # ================================================================
 
 def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
@@ -1060,7 +1334,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
 
 # ================================================================
-# MAIN UI (same as before, no changes needed)
+# MAIN UI
 # ================================================================
 
 st.markdown("""
@@ -1304,19 +1578,16 @@ with col_right:
         st.markdown("### 📉 Pareto Front")
         if fronts is not None and len(fronts) > 0 and len(fronts[0]) > 0:
             st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
-            fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
+            # Compute efrf for balanced solution if exists to pass as (api, efrf)
+            balanced_efrf = None
+            if balanced_solution is not None:
+                _, _, _, ef, _, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                balanced_efrf = (balanced_solution[0], ef)
+            fig = plot_pareto_clean(objectives, fronts, balanced_efrf, feasible_df, tested_point, efrf_max=0.40)
             if fig is not None:
-                if balanced_solution is not None:
-                    d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
-                    fig.add_trace(go.Scatter(
-                        x=[balanced_solution[0]],
-                        y=[ef],
-                        mode='markers',
-                        name='⭐ Golden (Balanced)',
-                        marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
-                        hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
-                    ))
                 st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No Pareto front found.")
 
         st.markdown("### ⭐ Golden Solution (Balanced)")
         if balanced_solution is not None:
