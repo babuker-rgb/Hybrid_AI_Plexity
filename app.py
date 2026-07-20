@@ -1,11 +1,8 @@
 """
-Hubryd AI – v29.27-R21 (Full Implementation)
+Hubryd AI – v29.27-R22 (Bugfixed Advanced Model)
 Advanced Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Multiple compaction models: Heckel, Kawakita, Walker
-- Material properties: Particle size, Moisture, Binder Grade
-- Process physics: Dwell Time, Decompression, Friction
-- Pharmaceutical properties: Disintegration, Dissolution, Compatibility
-- All required functions included.
+- Fixed compatibility_check array bug
+- All advanced features: multi-compaction models, material properties, process physics, pharmaceutical properties
 Nile Valley University · Sudan
 """
 
@@ -45,9 +42,9 @@ D_MIN = 0.70
 D_MAX = 0.99
 TENSILE_MIN = 1.50
 EFRF_MAX = 0.50
-DISINTEGRATION_MAX = 15.0      # Minutes (USP limit)
+DISINTEGRATION_MAX = 15.0
 
-# ----- Slider ranges -----
+# Slider ranges
 SLIDER_API_MIN = 80.0
 SLIDER_API_MAX = 98.0
 SLIDER_MCC_MIN = 1.5
@@ -218,6 +215,10 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 def compatibility_check(api_n, binder_grade, moisture):
+    """
+    Check compatibility between API and excipients.
+    Expects scalar values (not arrays).
+    """
     warnings = []
     score = 1.0
     if api_n > 90 and moisture > 4.0:
@@ -280,7 +281,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     return api, binder, pvpp, mgst, mcc
 
 def add_interaction_features(X_raw):
-    # X_raw shape: (n, 14)
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -295,7 +295,6 @@ def add_interaction_features(X_raw):
     friction = X_raw[:, 12:13]
     decompression_time = X_raw[:, 13:14]
 
-    # Original features
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -309,7 +308,6 @@ def add_interaction_features(X_raw):
     binder2 = binder ** 2
     speed2 = speed ** 2
 
-    # New interaction features
     particle_pressure = particle_size * pressure
     moisture_pressure = moisture * pressure
     particle_moisture = particle_size * moisture
@@ -403,7 +401,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
 
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_raw)
     dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
-    compat_result = compatibility_check(api_n, binder_grade_raw[0], moisture_raw[0])
+    
+    # FIXED: Pass scalar api_n[0] instead of the whole array
+    compat_result = compatibility_check(api_n[0], binder_grade_raw[0], moisture_raw[0])
 
     feature_names = [
         'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
@@ -537,7 +537,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II – FULL CLASS
+# NSGA-II
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -940,7 +940,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
 # MODEL TRAINING CACHE
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r21_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r22_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1117,7 +1117,7 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Advanced Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R21</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R22</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
     <p style="color:#8899aa; font-size:0.75rem;">Advanced Compaction Models · Material Properties · Process Physics · Pharmaceutical Properties</p>
 </div>
@@ -1140,7 +1140,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R21 — Advanced Pharmaceutical Model")
+    st.caption("🔬 v29.27-R22 — Bugfixed Advanced Model")
 
 # Load model
 try:
@@ -1310,7 +1310,6 @@ with col_right:
                         best_dist = dist
                         balanced_idx = idx
 
-                # Quality: max tensile
                 best_tensile = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1319,7 +1318,6 @@ with col_right:
                         best_tensile = t2
                         quality_idx = idx
 
-                # Cost: max API, min pressure
                 best_cost_score = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1469,7 +1467,6 @@ with col_right:
 
         generate_report_btn = st.button("📄 Generate Report (PDF)", key="knob_report")
         if generate_report_btn and st.session_state.benchmark_df is not None:
-            # For simplicity, we just show a message, but could implement full PDF generation
             st.info("PDF generation for advanced model is not fully implemented in this version.")
 
     else:
