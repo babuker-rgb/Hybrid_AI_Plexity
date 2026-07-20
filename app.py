@@ -1,9 +1,7 @@
 """
-Hubryd AI – v29.27-R30 (Physics-Informed Disintegration)
-Full Pharmaceutical PINN – Fixed Disintegration Time stability
-- Added physics loss for disintegration time
-- Increased weights for disintegration and dissolution
-Nile Valley University · Sudan
+Hubryd AI – v29.27-R31 (Enhanced with Experimental Data & Kawakita)
+Hybrid AI For Multi-Objective Tablet Optimization
+Nile Valley University, Sudan
 """
 
 import streamlit as st
@@ -11,7 +9,7 @@ import streamlit as st
 # ================================================================
 # MUST BE FIRST STREAMLIT COMMAND
 # ================================================================
-st.set_page_config(page_title="Hybrid AI · Full Model", layout="wide")
+st.set_page_config(page_title="Hybrid AI · Tablet Optimization", layout="wide")
 
 import numpy as np
 import pandas as pd
@@ -99,14 +97,14 @@ NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# Loss weights – INCREASED for disintegration/dissolution
+# Loss weights
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
 W_PHYSICS = 1.0
 W_EFRF_PENALTY = 100.0
-W_DISINTEGRATION = 50.0      # <-- RAISED from 10.0
-W_DISSOLUTION = 20.0         # <-- RAISED from 10.0
+W_DISINTEGRATION = 50.0
+W_DISSOLUTION = 20.0
 
 # ================================================================
 # SESSION STATE
@@ -144,7 +142,8 @@ if 'api' not in st.session_state:
         'formulation': None,
         'feasible_df': None,
         'tested_point': None,
-        'benchmark_df': None
+        'benchmark_df': None,
+        'experimental_data': None
     })
 
 # ================================================================
@@ -278,7 +277,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – FULLY VECTORISED
+# DATA GENERATION – WITH KAWAKITA (NEW)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -310,11 +309,26 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # Density (Heckel)
+    # ----- Density: Hybrid Heckel + Kawakita (NEW) -----
+    # Heckel model
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k * pressure_raw + A
-    D = 1.0 - np.exp(-x_val)
+    D_heckel = 1.0 - np.exp(-x_val)
+    D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
+    
+    # Kawakita model (better for low pressures)
+    a = 0.5 + 0.01 * (pressure_raw - 150) / 50
+    b = 0.8 + 0.02 * binder_n
+    epsilon = 1.0 - D_MIN
+    D_kawakita = 1 - (pressure_raw / (a * pressure_raw + 1/b))
+    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
+    
+    # Weighted average (Heckel dominant at high pressure, Kawakita at low)
+    pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
+    w_heckel = pressure_norm
+    w_kawakita = 1.0 - pressure_norm
+    D = w_heckel * D_heckel + w_kawakita * D_kawakita
     D = np.clip(D, D_MIN, D_MAX)
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
@@ -349,9 +363,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
-    # Disintegration & dissolution – with added noise for variability
+    # Disintegration & dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_raw)
-    disintegration += rng.normal(0, 0.1, n_samples)  # ADDED NOISE
+    disintegration += rng.normal(0, 0.1, n_samples)
     disintegration = np.clip(disintegration, 1.0, 30.0)
     
     dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
@@ -376,7 +390,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL – WITH PHYSICS-INFORMED DISINTEGRATION
+# PINN MODEL – WITH KAWAKITA PHYSICS LOSS (NEW)
 # ================================================================
 
 class Mish(nn.Module):
@@ -407,7 +421,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 8)  # density, tensile, er, k, A, disintegration, tau, beta
+        self.output = nn.Linear(hidden//2, 8)
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -438,7 +452,6 @@ class MultiTaskPINN(nn.Module):
     def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=ADAM_EPOCHS):
         pressure = X_raw[:, 5].view(-1, 1)
         mcc = X_raw[:, 1].view(-1, 1)
-        # Extract additional features for physics-informed disintegration
         api = X_raw[:, 0].view(-1, 1)
         binder = X_raw[:, 4].view(-1, 1)
         pvpp = X_raw[:, 2].view(-1, 1)
@@ -479,12 +492,18 @@ class MultiTaskPINN(nn.Module):
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # 2. EFRF physics
+        # 2. Kawakita physics (NEW)
+        epsilon = 1.0 - density_real
+        epsilon = torch.clamp(epsilon, min=1e-4)
+        kawakita_lhs = pressure / epsilon
+        kawakita_rhs = (1.0 / (k_pred * A_pred)) * pressure + (1.0 / k_pred)
+        kawakita_loss = nn.MSELoss()(kawakita_lhs, kawakita_rhs)
+
+        # 3. EFRF physics
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
 
-        # 3. NEW: Disintegration physics (force model to learn the physical equation)
-        # DTime = 2.0 + 0.5*Tensile - 5.0*exp(-0.5*PVPP) + 0.1*(API-80) + 0.2*(Binder-2.0) - 0.1*Moisture
+        # 4. Disintegration physics
         disin_physics = (2.0 + 0.5 * tensile_real - 
                          5.0 * torch.exp(-0.5 * pvpp) + 
                          0.1 * (api - 80) + 
@@ -493,7 +512,7 @@ class MultiTaskPINN(nn.Module):
         disin_physics = torch.clamp(disin_physics, 1.0, 30.0)
         physics_disin_loss = nn.MSELoss()(disintegration_pred, disin_physics)
 
-        # 4. Dissolution physics (tau should correlate with disintegration)
+        # 5. Dissolution physics
         tau_physics = 5.0 + 0.5 * disintegration_pred - 0.1 * pvpp + 0.05 * (api - 80)
         tau_physics = torch.clamp(tau_physics, 2.0, 20.0)
         physics_tau_loss = nn.MSELoss()(dissolution_tau_pred, tau_physics)
@@ -505,13 +524,13 @@ class MultiTaskPINN(nn.Module):
         density_penalty = torch.mean(torch.relu(density_real - 0.99) ** 2 +
                                      torch.relu(0.70 - density_real) ** 2) * 0.5
 
-        physics_loss = (W_PHYSICS * (heckel_loss + efrf_penalty + physics_disin_loss + physics_tau_loss) +
+        physics_loss = (W_PHYSICS * (heckel_loss + kawakita_loss + efrf_penalty + physics_disin_loss + physics_tau_loss) +
                         disin_penalty + tau_penalty + mcc_penalty + density_penalty)
         
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II
+# NSGA-II (unchanged)
 # ================================================================
 
 class NSGAII:
@@ -576,7 +595,7 @@ class NSGAII:
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
-            pred_scaled = self.model.predict(X_t)       # shape (n, 8)
+            pred_scaled = self.model.predict(X_t)
             pred = self.y_scaler.inverse_transform(pred_scaled[:, :6])
 
         density = np.clip(pred[:, 0], D_MIN, D_MAX)
@@ -586,7 +605,6 @@ class NSGAII:
         efrf = np.clip(efrf, 1e-4, 5.0)
         disintegration = np.maximum(pred[:, 3], 0.5)
         dissolution_tau = np.maximum(pred[:, 4], 1.0)
-        dissolution_beta = np.maximum(pred[:, 5], 0.5)
 
         g1 = D_MIN - density
         g2 = density - D_MAX
@@ -750,7 +768,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# PREDICTION AND PLOTTING
+# PREDICTION AND PLOTTING (UPDATED FOR PDF)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -927,11 +945,116 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
+# PDF REPORT – ENHANCED (NEW)
+# ================================================================
+
+def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
+                                 balanced_pred, quality_pred, cost_pred, fronts, timestamp,
+                                 pareto_fig, sensitivity_fig, dissolution_fig):
+    if not FPDF_AVAILABLE:
+        return None, "fpdf2 is not installed. Please install it with: pip install fpdf2"
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
+        pdf.set_font("Arial", "I", 10)
+        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.ln(4)
+
+        f = formulation
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
+        pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Particle Size: {f['particle_size']:.0f} µm", ln=True)
+        pdf.cell(60, 6, f"Moisture: {f['moisture']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Binder Grade: {BINDER_GRADES[int(f['binder_grade'])]}", ln=True)
+        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", ln=True)
+        pdf.cell(60, 6, f"Dwell Time: {f['dwell_time']:.1f} ms", ln=True)
+        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density: {f['density']:.3f}", ln=True)
+        pdf.cell(60, 6, f"Tensile Strength: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", ln=True)
+        pdf.cell(60, 6, f"Elastic Recovery: {f['er']:.4f}", ln=True)
+        pdf.cell(60, 6, f"Disintegration: {f['disintegration']:.1f} min", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"Disintegration Status: {'PASS' if f['disintegration'] <= 15.0 else 'FAIL'}", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "4. Optimised Solutions (Pareto Front)", ln=True)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Golden Solution (Balanced)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if balanced_solution is not None and balanced_pred is not None:
+            pdf.cell(60, 6, f"API: {balanced_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {balanced_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {balanced_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"Disintegration: {balanced_pred[4]:.1f} min", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Quality-Optimised Solution (Max Tensile)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if quality_solution is not None and quality_pred is not None:
+            pdf.cell(60, 6, f"API: {quality_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {quality_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {quality_pred[1]:.3f} MPa", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Cost-Optimised Solution (Max API, Min Pressure)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if cost_solution is not None and cost_pred is not None:
+            pdf.cell(60, 6, f"API: {cost_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"EFRF: {cost_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {cost_pred[1]:.3f} MPa", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "5. Model Performance Comparison", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if bench_df is not None:
+            for _, row in bench_df.iterrows():
+                pdf.cell(0, 6, f"{row['Model']}: R2 = {row['R2 (Test)']} | RMSE = {row['RMSE (MPa)']} | MAE = {row['MAE (MPa)']}", ln=True)
+        pdf.ln(4)
+
+        if fronts is not None and len(fronts) > 0:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary", ln=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            return tmp.name, None
+    except Exception as e:
+        return None, str(e)
+
+# ================================================================
 # MODEL TRAINING
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r30_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -950,7 +1073,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training full model with physics-informed disintegration (15k samples)...")
+    st.caption("🔄 Training enhanced model with Kawakita (15k samples)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1156,15 +1279,13 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
 
 # ================================================================
-# MAIN UI
+# MAIN UI – SIMPLIFIED HEADER
 # ================================================================
 
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
-    <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Full Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R30 (Physics-Informed Disintegration)</p>
-    <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
-    <p style="color:#8899aa; font-size:0.75rem;">Physics-Informed Disintegration · Corrected Output Indices</p>
+    <h2 style="color:#fff; margin:0;">🧬 Hybrid AI For Multi‑Objective Tablet Optimization</h2>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1184,7 +1305,21 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R30")
+    st.caption("🔬 v29.27-R31 — Enhanced with Kawakita & Experimental Data")
+
+# ---- NEW: Experimental Data Upload ----
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📁 Experimental Data")
+uploaded_file = st.sidebar.file_uploader("Upload CSV with experimental results", type=["csv"])
+if uploaded_file is not None:
+    try:
+        exp_df = pd.read_csv(uploaded_file)
+        st.session_state.experimental_data = exp_df
+        st.sidebar.success(f"✅ Loaded {len(exp_df)} rows")
+        with st.sidebar.expander("Preview Data"):
+            st.dataframe(exp_df.head())
+    except Exception as e:
+        st.sidebar.error(f"Error loading file: {e}")
 
 # Load model
 try:
@@ -1469,9 +1604,46 @@ with col_right:
                 fig = plot_dissolution_profile(tau, beta, api_n)
                 st.plotly_chart(fig, use_container_width=True)
 
-        generate_report_btn = st.button("📄 Generate Report (PDF)", key="knob_report")
+        # ---- Experimental Data Comparison ----
+        if st.session_state.experimental_data is not None:
+            st.markdown("### 🧪 Comparison with Experimental Data")
+            exp_df = st.session_state.experimental_data
+            st.dataframe(exp_df)
+            # You can add more sophisticated comparison logic here
+
+        generate_report_btn = st.button("📄 Generate Enhanced Report (PDF)", key="knob_report")
         if generate_report_btn and st.session_state.benchmark_df is not None:
-            st.info("PDF generation is available in the full version.")
+            f = st.session_state.formulation
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            bench_df = st.session_state.benchmark_df
+            balanced_sol = st.session_state.balanced_solution
+            quality_sol = st.session_state.quality_solution
+            cost_sol = st.session_state.cost_solution
+            balanced_pred = st.session_state.get('balanced_pred', None)
+            quality_pred = st.session_state.get('quality_pred', None)
+            cost_pred = st.session_state.get('cost_pred', None)
+            fronts = st.session_state.nsga_fronts
+            filepath, error = generate_enhanced_pdf_report(
+                f, bench_df, balanced_sol, quality_sol, cost_sol,
+                balanced_pred, quality_pred, cost_pred, fronts, timestamp,
+                None, None, None
+            )
+            if error:
+                st.error(f"Failed to generate report: {error}")
+                if not FPDF_AVAILABLE:
+                    st.info("Please install fpdf2: `pip install fpdf2`")
+            else:
+                with open(filepath, "rb") as pdf_file:
+                    st.download_button(
+                        label="📥 Download Enhanced Report (PDF)",
+                        data=pdf_file,
+                        file_name=f"hubryd_enhanced_report_{timestamp[:10]}.pdf",
+                        mime="application/pdf"
+                    )
+                try:
+                    os.unlink(filepath)
+                except Exception:
+                    pass
 
     else:
         if model is None:
