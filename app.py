@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Ultimate Kawakita Fix v2)
+Hubryd AI – v29.27-R31 (Stable Training + Low b)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -108,7 +108,7 @@ W_DISINTEGRATION = 50.0
 W_DISSOLUTION = 20.0
 
 # ================================================================
-# SESSION STATE
+# SESSION STATE (show_comparison default False)
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -128,7 +128,7 @@ if 'api' not in st.session_state:
         'granule': 125.0,
         'show_cost_solution': False,
         'show_quality_solution': False,
-        'show_comparison': True,
+        'show_comparison': False,      # ← Default OFF
         'show_sensitivity': False,
         'show_dissolution': False,
         'granule_mode': 'Fixed',
@@ -289,7 +289,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – ULTIMATE KAWAKITA FIX v2 (extremely small b)
+# DATA GENERATION – STABLE TRAINING (with controlled randomness)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -325,7 +325,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (ULTIMATE FIX v2) -----
+    # ----- Density: Hybrid Heckel + Kawakita (STABLE TRAINING) -----
     # Heckel model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
@@ -333,19 +333,20 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (b extremely small → 1/b ~ 9000-15600)
-    a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)   # 0.85 ~ 0.90
-    b_kawakita = 0.00005 + 0.00001 * binder_n            # 0.000064 ~ 0.00011
+    # Kawakita model (controlled random b to create variance)
+    # b ranges from 0.00001 to 0.0002 → 1/b ranges from 5,000 to 100,000
+    # This creates sufficient variance in density while keeping it physical
+    b_kawakita = 0.00001 + 0.00019 * rng.random(n_samples)
+    # a ranges from 0.80 to 0.95
+    a_kawakita = 0.80 + 0.15 * rng.random(n_samples)
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
     D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
-    # Weighted average (Heckel dominant at high pressure, Kawakita at low)
-    pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
-    w_heckel = pressure_norm
-    w_kawakita = 1.0 - pressure_norm
-    D = w_heckel * D_heckel + w_kawakita * D_kawakita
+    # Weighted average with random weight to increase variance
+    weight = rng.uniform(0.3, 0.7, n_samples)  # random mixing
+    D = weight * D_heckel + (1 - weight) * D_kawakita
     D = np.clip(D, D_MIN, D_MAX)
-    D += rng.normal(0, 0.002, n_samples)
+    D += rng.normal(0, 0.003, n_samples)  # slightly more noise
     D = np.clip(D, D_MIN, D_MAX)
 
     # Tensile
@@ -366,7 +367,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
 
     strength = (tensile_base * api_effect * binder_effect *
                 mgst_effect * pvpp_effect * speed_effect * particle_effect)
-    strength *= rng.normal(1.0, 0.01, n_samples)
+    strength *= rng.normal(1.0, 0.02, n_samples)
     strength = np.clip(strength, 0.5, 6.0)
 
     # Elastic Recovery
@@ -375,16 +376,16 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
                0.1 * (pressure_raw - 100.0)/150.0 +
                0.02 * (decompression_time_raw - 35.0)/30.0)
     er_base = er_base * (1.0 - 0.15 * (D - 0.4))
-    er = er_base + rng.normal(0, 0.01, n_samples)
+    er = er_base + rng.normal(0, 0.02, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
     # Disintegration & dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_n)
-    disintegration += rng.normal(0, 0.1, n_samples)
+    disintegration += rng.normal(0, 0.15, n_samples)
     disintegration = np.clip(disintegration, 1.0, 30.0)
 
     dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
-    dissolution_tau = dissolution_params['tau'] + rng.normal(0, 0.1, n_samples)
+    dissolution_tau = dissolution_params['tau'] + rng.normal(0, 0.15, n_samples)
     dissolution_tau = np.clip(dissolution_tau, 2.0, 20.0)
     dissolution_beta = np.clip(dissolution_params['beta'], 0.8, 2.5)
 
@@ -405,7 +406,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL (unchanged – independent Heckel & Kawakita parameters)
+# PINN MODEL (unchanged)
 # ================================================================
 
 class Mish(nn.Module):
@@ -1086,11 +1087,11 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING (new cache file for v2)
+# MODEL TRAINING (stable training)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_ultimate_v2.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_stable.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1109,7 +1110,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training ULTIMATE Kawakita v2 (extremely small b)...")
+    st.caption("🔄 Training STABLE version (high variance data)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1162,7 +1163,7 @@ def load_or_train():
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_stable.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1171,8 +1172,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_stable.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_stable.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -1343,7 +1344,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R31 — Ultimate Kawakita v2 (extremely small b)")
+    st.caption("🔬 v29.27-R31 — Stable Training + Model Comparison OFF by default")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1685,7 +1686,8 @@ with col_right:
         st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
 
         # ---- Additional analysis sections (optional) ----
-        st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", True), key="show_comparison")
+        # Model Comparison toggle - default OFF as requested
+        st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", False), key="show_comparison")
         if st.session_state.show_comparison:
             st.markdown("### 📊 Model Comparison")
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
