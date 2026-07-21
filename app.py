@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Stable Training + Low b)
+Hubryd AI – v29.27-R31 (Physically Stable Training)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -98,12 +98,12 @@ NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# Loss weights
+# Loss weights (reduced physics weight for stability)
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
-W_PHYSICS = 1.0
-W_EFRF_PENALTY = 100.0
+W_PHYSICS = 0.3   # Reduced to prevent physics loss from dominating
+W_EFRF_PENALTY = 50.0
 W_DISINTEGRATION = 50.0
 W_DISSOLUTION = 20.0
 
@@ -128,7 +128,7 @@ if 'api' not in st.session_state:
         'granule': 125.0,
         'show_cost_solution': False,
         'show_quality_solution': False,
-        'show_comparison': False,      # ← Default OFF
+        'show_comparison': False,
         'show_sensitivity': False,
         'show_dissolution': False,
         'granule_mode': 'Fixed',
@@ -289,7 +289,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – STABLE TRAINING (with controlled randomness)
+# DATA GENERATION – PHYSICALLY STABLE (controlled variance)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -325,31 +325,49 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (STABLE TRAINING) -----
-    # Heckel model
+    # ----- Density: PHYSICAL MODEL WITH CONTROLLED VARIANCE -----
+    
+    # 1. Heckel model (high pressure behaviour)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (controlled random b to create variance)
-    # b ranges from 0.00001 to 0.0002 → 1/b ranges from 5,000 to 100,000
-    # This creates sufficient variance in density while keeping it physical
-    b_kawakita = 0.00001 + 0.00019 * rng.random(n_samples)
-    # a ranges from 0.80 to 0.95
-    a_kawakita = 0.80 + 0.15 * rng.random(n_samples)
+    # 2. Kawakita model (low to medium pressure behaviour)
+    # Using physically meaningful parameters with slight variance
+    a_kawakita = 0.82 + 0.06 * (binder_n - 3.0) / 3.0  # 0.82 ~ 0.88
+    a_kawakita = np.clip(a_kawakita, 0.78, 0.92)
+    # b depends on binder and MCC: higher binder = better compressibility
+    b_kawakita = 0.008 + 0.002 * (binder_n - 1.4) / 4.6 + 0.001 * (mcc_n - 1.5) / 6.5
+    b_kawakita = np.clip(b_kawakita, 0.002, 0.015)
+    # Add slight random variation (±5%)
+    b_kawakita *= (1.0 + rng.normal(0, 0.05, n_samples))
+    b_kawakita = np.clip(b_kawakita, 0.001, 0.02)
+    
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
     D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
-    # Weighted average with random weight to increase variance
-    weight = rng.uniform(0.3, 0.7, n_samples)  # random mixing
-    D = weight * D_heckel + (1 - weight) * D_kawakita
+    # 3. Weighted average (pressure-dependent mixing)
+    pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
+    w_heckel = pressure_norm
+    w_kawakita = 1.0 - pressure_norm
+    
+    # Random variation in weighting (±10%) to increase variance
+    w_heckel = w_heckel + rng.normal(0, 0.05, n_samples)
+    w_heckel = np.clip(w_heckel, 0.1, 0.9)
+    w_kawakita = 1.0 - w_heckel
+    
+    D = w_heckel * D_heckel + w_kawakita * D_kawakita
     D = np.clip(D, D_MIN, D_MAX)
-    D += rng.normal(0, 0.003, n_samples)  # slightly more noise
+    
+    # Add physical noise: moisture and particle size effects
+    moisture_effect = -0.003 * (moisture_n - 2.0)  # moisture reduces density slightly
+    particle_effect = -0.001 * (particle_size_raw - 50) / 100  # larger particles = lower density
+    D += moisture_effect + particle_effect + rng.normal(0, 0.005, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile
+    # Tensile (unchanged but with slight variation)
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -503,7 +521,7 @@ class MultiTaskPINN(nn.Module):
         data_loss = (W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er +
                      W_DISINTEGRATION * loss_disin + W_DISSOLUTION * (loss_tau + loss_beta))
 
-        # Physics losses
+        # Physics losses (reduced weight for stability)
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -982,7 +1000,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# PDF REPORT (unchanged)
+# PDF REPORT
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
@@ -1087,11 +1105,11 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING (stable training)
+# MODEL TRAINING
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_stable.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1110,7 +1128,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training STABLE version (high variance data)...")
+    st.caption("🔄 Training FINAL physically stable model...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1163,7 +1181,7 @@ def load_or_train():
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_stable.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1172,8 +1190,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_stable.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_stable.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -1344,7 +1362,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R31 — Stable Training + Model Comparison OFF by default")
+    st.caption("🔬 v29.27-R31 — FINAL physically stable version")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1392,7 +1410,6 @@ with col_left:
             st.session_state.binder_grade = binder_grade_idx
 
         total = api + binder + pvpp + mgst + mcc + moisture
-        # Tolerance increased to 0.2 to avoid rounding warnings
         if abs(total-100) < 0.2:
             st.success(f"✅ Total = {total:.2f}%")
         else:
@@ -1685,8 +1702,7 @@ with col_right:
         st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", False), key="show_cost_solution")
         st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
 
-        # ---- Additional analysis sections (optional) ----
-        # Model Comparison toggle - default OFF as requested
+        # ---- Model Comparison - OFF by default ----
         st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", False), key="show_comparison")
         if st.session_state.show_comparison:
             st.markdown("### 📊 Model Comparison")
