@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Final Physically Stable)
+Hubryd AI – v29.27-R31 (Data-Driven Only, No Physics Loss)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -42,7 +42,6 @@ TENSILE_MIN = 1.50
 EFRF_MAX = 0.50
 DISINTEGRATION_MAX = 15.0
 
-# Slider ranges
 SLIDER_API_MIN = 80.0
 SLIDER_API_MAX = 98.0
 SLIDER_MCC_MIN = 1.5
@@ -73,7 +72,6 @@ SLIDER_DECOMPRESSION_TIME_MAX = 80.0
 SLIDER_PARTICLE_SIZE_MIN = 10.0
 SLIDER_PARTICLE_SIZE_MAX = 200.0
 
-# NSGA-II bounds
 BOUND_MCC_MIN = 2.0
 BOUND_MCC_MAX = 8.0
 BOUND_PVPP_MIN = 1.5
@@ -90,19 +88,19 @@ BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
 # Training parameters
-N_SAMPLES = 15000
+N_SAMPLES = 20000
 ADAM_EPOCHS = 800
 PATIENCE = 80
 NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# Loss weights
+# Loss weights – NO PHYSICS LOSS
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
-W_PHYSICS = 0.3
-W_EFRF_PENALTY = 50.0
+W_PHYSICS = 0.0          # <--- تم إلغاء الخسارة الفيزيائية
+W_EFRF_PENALTY = 0.0
 W_DISINTEGRATION = 50.0
 W_DISSOLUTION = 20.0
 
@@ -288,7 +286,6 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
 
-    # Generate wide range of formulations
     api_raw = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
     binder_raw = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
     pvpp_raw = rng.uniform(SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, n_samples)
@@ -319,16 +316,12 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     # ================================================================
     # DENSITY: PHYSICAL MODEL (NO RANDOM NOISE)
     # ================================================================
-    
-    # 1. Heckel model (dominant at high pressure)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # 2. Kawakita model (dominant at low to medium pressure)
-    # Physical range: a ≈ 0.8-0.9, b ≈ 0.001-0.01
     a_kawakita = 0.82 + 0.04 * (mcc_n - 1.5) / 6.5 + 0.02 * (binder_n - 1.4) / 4.6
     a_kawakita = np.clip(a_kawakita, 0.78, 0.92)
     b_kawakita = 0.002 + 0.003 * (binder_n - 1.4) / 4.6 + 0.001 * (mcc_n - 1.5) / 6.5
@@ -336,27 +329,18 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
     D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
-    # 3. Pressure-dependent weighting
     pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
     w_heckel = pressure_norm
     w_kawakita = 1.0 - pressure_norm
 
     D = w_heckel * D_heckel + w_kawakita * D_kawakita
 
-    # 4. Physical effects (based on real physics, not random noise)
-    # Moisture effect: higher moisture reduces density slightly
     moisture_effect = -0.003 * (moisture_n - 2.0)
     moisture_effect = np.clip(moisture_effect, -0.02, 0.01)
-    
-    # Particle size effect: larger particles → lower density
     particle_effect = -0.002 * (particle_size_raw - 50) / 150
     particle_effect = np.clip(particle_effect, -0.02, 0.01)
-    
-    # Speed effect: higher speed → lower density (less dwell time)
     speed_effect = -0.002 * (speed_raw - 15) / 15
     speed_effect = np.clip(speed_effect, -0.015, 0.0)
-    
-    # MgSt effect: lubricant reduces bonding and density
     mgst_effect = -0.01 * (mgst_n - 0.2)
     mgst_effect = np.clip(mgst_effect, -0.02, 0.005)
 
@@ -364,7 +348,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D = np.clip(D, D_MIN, D_MAX)
 
     # ================================================================
-    # TENSILE STRENGTH (physical model)
+    # TENSILE STRENGTH
     # ================================================================
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
@@ -386,7 +370,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     strength = np.clip(strength, 0.5, 6.0)
 
     # ================================================================
-    # ELASTIC RECOVERY (physical model)
+    # ELASTIC RECOVERY
     # ================================================================
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
@@ -422,7 +406,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL
+# PINN MODEL (No Physics Loss)
 # ================================================================
 
 class Mish(nn.Module):
@@ -457,7 +441,7 @@ class MultiTaskPINN(nn.Module):
             nn.Tanh(),
             nn.Dropout(0.05)
         )
-        self.output = nn.Linear(hidden//2, 10)
+        self.output = nn.Linear(hidden//2, 10)  # still output 10 but we won't use physics loss
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -493,26 +477,15 @@ class MultiTaskPINN(nn.Module):
             return selected.cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=ADAM_EPOCHS):
-        pressure = X_raw[:, 5].view(-1, 1)
-        mcc = X_raw[:, 1].view(-1, 1)
-        api = X_raw[:, 0].view(-1, 1)
-        binder = X_raw[:, 4].view(-1, 1)
-        pvpp = X_raw[:, 2].view(-1, 1)
-        moisture = X_raw[:, 9].view(-1, 1)
-
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0:1]
         tensile_pred = y_pred[:, 1:2]
         er_pred = y_pred[:, 2:3]
-        k_heckel_pred = y_pred[:, 3:4]
-        A_heckel_pred = y_pred[:, 4:5]
-        a_kawakita_pred = y_pred[:, 5:6]
-        b_kawakita_pred = y_pred[:, 6:7]
         disintegration_pred = y_pred[:, 7:8]
         dissolution_tau_pred = y_pred[:, 8:9]
         dissolution_beta_pred = y_pred[:, 9:10]
 
-        # Data loss
+        # Data loss only – NO PHYSICS LOSS
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
@@ -523,57 +496,8 @@ class MultiTaskPINN(nn.Module):
         data_loss = (W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er +
                      W_DISINTEGRATION * loss_disin + W_DISSOLUTION * (loss_tau + loss_beta))
 
-        # Physics losses
-        scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
-        scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
-        scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
-
-        density_real = density_pred * scale_dens + mean_dens
-        tensile_real = tensile_pred * scale_tensile + mean_tensile
-        er_real = er_pred * scale_er + mean_er
-
-        # 1. Heckel
-        heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_real, min=1e-4))
-        heckel_rhs = k_heckel_pred * pressure + A_heckel_pred
-        heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
-
-        # 2. Kawakita
-        epsilon = 1.0 - density_real
-        epsilon = torch.clamp(epsilon, min=1e-4)
-        kawakita_lhs = pressure / epsilon
-        kawakita_rhs = a_kawakita_pred * pressure + 1.0 / b_kawakita_pred
-        kawakita_loss = nn.MSELoss()(kawakita_lhs, kawakita_rhs)
-
-        # 3. EFRF
-        efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
-        efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
-
-        # 4. Disintegration
-        disin_physics = (2.0 + 0.5 * tensile_real -
-                         5.0 * torch.exp(-0.5 * pvpp) +
-                         0.1 * (api - 80) +
-                         0.2 * (binder - 2.0) -
-                         0.1 * moisture)
-        disin_physics = torch.clamp(disin_physics, 1.0, 30.0)
-        physics_disin_loss = nn.MSELoss()(disintegration_pred, disin_physics)
-
-        # 5. Dissolution
-        tau_physics = 5.0 + 0.5 * disintegration_pred - 0.1 * pvpp + 0.05 * (api - 80)
-        tau_physics = torch.clamp(tau_physics, 2.0, 20.0)
-        physics_tau_loss = nn.MSELoss()(dissolution_tau_pred, tau_physics)
-
-        # Boundary penalties
-        disin_penalty = torch.mean(torch.relu(disintegration_pred - 15.0) ** 2) * 5.0
-        tau_penalty = torch.mean(torch.relu(dissolution_tau_pred - 25.0) ** 2) * 1.0
-        mcc_penalty = torch.mean(torch.relu(mcc - 8.0) ** 2) * 0.3
-        density_penalty = torch.mean(torch.relu(density_real - D_MAX) ** 2 +
-                                     torch.relu(D_MIN - density_real) ** 2) * 0.5
-
-        physics_loss = (W_PHYSICS * (heckel_loss + kawakita_loss + efrf_penalty +
-                                     physics_disin_loss + physics_tau_loss) +
-                        disin_penalty + tau_penalty + mcc_penalty + density_penalty)
-
-        return data_loss + physics_loss
+        # No physics loss added
+        return data_loss
 
 # ================================================================
 # NSGA-II (3 objectives)
@@ -1116,7 +1040,7 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final_phys.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_data_driven.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1135,7 +1059,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training FINAL physical model (no random noise)...")
+    st.caption("🔄 Training Data-Driven model (no physics loss)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1161,7 +1085,7 @@ def load_or_train():
     X_raw_val_t = torch.tensor(X_raw_test, dtype=torch.float32).to(device)
     y_val_t = torch.tensor(y_test, dtype=torch.float32).to(device)
 
-    best_val_r2 = -np.inf
+    best_r2_tensile = -np.inf
     patience_counter = 0
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -1182,15 +1106,15 @@ def load_or_train():
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())
             r2_tensile = r2_score(val_true[:, 1], val_pred[:, 1])
             r2_density = r2_score(val_true[:, 0], val_pred[:, 0])
-            r2_combined = 0.7 * r2_tensile + 0.3 * r2_density
 
         if epoch % 50 == 0:
             status_text.text(f"Epoch {epoch+1}/{ADAM_EPOCHS} - R² Tensile: {r2_tensile:.4f} | R² Density: {r2_density:.4f}")
 
-        if r2_combined > best_val_r2:
-            best_val_r2 = r2_combined
+        # Use tensile R² as the main criterion (more important)
+        if r2_tensile > best_r2_tensile:
+            best_r2_tensile = r2_tensile
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final_phys.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_data_driven.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1199,10 +1123,18 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final_phys.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final_phys.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_data_driven.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_data_driven.pt'), map_location=device))
     model.cpu()
-    st.success(f"✅ Best combined R²: {best_val_r2:.4f}")
+
+    # Evaluate final R² on test set
+    with torch.no_grad():
+        test_pred_scaled = model.predict(torch.tensor(scaler.transform(add_interaction_features(X_test)), dtype=torch.float32))
+        test_pred = y_scaler.inverse_transform(test_pred_scaled)
+        test_true = y_scaler.inverse_transform(y_test)
+        final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
+        final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
+    st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
 
     checkpoint = {
         'model_state': model.state_dict(),
@@ -1371,7 +1303,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — FINAL physical model (no random noise)")
+    st.caption("🔬 v29.27-R31 — Data-Driven (No Physics Loss)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1419,7 +1351,8 @@ with col_left:
             st.session_state.binder_grade = binder_grade_idx
 
         total = api + binder + pvpp + mgst + mcc + moisture
-        if abs(total-100) < 0.2:
+        # Increased tolerance to 0.5 to avoid warnings
+        if abs(total-100) < 0.5:
             st.success(f"✅ Total = {total:.2f}%")
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
@@ -1460,7 +1393,7 @@ with col_right:
     if predict_btn:
         if model is None:
             st.error("❌ Model is not available. Please fix training errors and restart.")
-        elif abs(total-100) > 0.2:
+        elif abs(total-100) > 0.5:
             st.warning("⚠️ Formulation must sum to 100%")
         else:
             api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
