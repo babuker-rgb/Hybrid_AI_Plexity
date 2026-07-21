@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Final – Auto Retrain on Mismatch)
+Hubryd AI – v29.27-R31 (Stable – 31 Features Fixed)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -94,7 +94,7 @@ NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# No physics loss
+# Loss weights (no physics loss)
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
@@ -143,7 +143,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# SAFE HELPER FUNCTIONS – FIXED (31 features total)
+# SAFE HELPER FUNCTIONS
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
@@ -198,7 +198,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     return api, binder, pvpp, mgst, mcc, moisture
 
 def add_interaction_features(X_raw):
-    """Return 31 features: 14 original + 17 interactions."""
+    """Returns exactly 31 features: 14 original + 17 interactions."""
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -213,7 +213,6 @@ def add_interaction_features(X_raw):
     friction = X_raw[:, 12:13]
     decompression_time = X_raw[:, 13:14]
 
-    # 17 interaction features
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -240,7 +239,7 @@ def add_interaction_features(X_raw):
         api2, pressure2, binder2, speed2,
         particle_pressure, moisture_pressure,
         particle_moisture, dwell_pressure, friction_pressure
-    ], axis=1)  # 14 + 17 = 31
+    ], axis=1)
 
 def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     if np.isscalar(speed_rpm):
@@ -280,7 +279,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION (consistent with 31 features)
+# DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -313,7 +312,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # DENSITY: Physical model (no random noise)
+    # Density: Physical model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
@@ -345,7 +344,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += moisture_effect + particle_effect + speed_effect + mgst_effect
     D = np.clip(D, D_MIN, D_MAX)
 
-    # TENSILE STRENGTH
+    # Tensile Strength
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -365,7 +364,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
                 mgst_effect * pvpp_effect * speed_effect * particle_effect)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # ELASTIC RECOVERY
+    # Elastic Recovery
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0 +
@@ -373,7 +372,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er_base = er_base * (1.0 - 0.15 * (D - 0.4))
     er = np.clip(er_base, 0.5, 4.0)
 
-    # DISINTEGRATION & DISSOLUTION
+    # Disintegration & Dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_n)
     disintegration = np.clip(disintegration, 1.0, 30.0)
 
@@ -398,7 +397,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL (No Physics Loss)
+# PINN MODEL
 # ================================================================
 
 class Mish(nn.Module):
@@ -490,7 +489,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss
 
 # ================================================================
-# NSGA-II (3 objectives)
+# NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -1026,25 +1025,24 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING (with auto-retrain on mismatch)
+# MODEL TRAINING
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_final_31feat.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_stable_31feat.pt')
 
 @st.cache_resource
 def load_or_train():
-    # Try to load from cache
+    # Check if cache exists and is valid
     if os.path.exists(CHECKPOINT_PATH):
         try:
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            # Verify feature count
-            expected_input_dim = ckpt['input_dim']
-            # Test with a dummy sample to ensure compatibility
+            # Verify feature count matches
             test_raw = np.random.randn(1, 14)
             test_aug = add_interaction_features(test_raw)
-            if test_aug.shape[1] == expected_input_dim:
-                model = MultiTaskPINN(expected_input_dim, hidden=HIDDEN_SIZE)
+            expected_dim = test_aug.shape[1]
+            if ckpt['input_dim'] == expected_dim:
+                model = MultiTaskPINN(expected_dim, hidden=HIDDEN_SIZE)
                 model.load_state_dict(ckpt['model_state'])
                 scaler = ckpt['scaler']
                 y_scaler = ckpt['y_scaler']
@@ -1052,14 +1050,14 @@ def load_or_train():
                 df = ckpt['df']
                 return model, scaler, y_scaler, features, df
             else:
-                st.warning(f"Feature mismatch: cache has {expected_input_dim}, current has {test_aug.shape[1]}. Retraining...")
+                st.warning(f"Feature mismatch: cache has {ckpt['input_dim']}, expected {expected_dim}. Retraining...")
                 os.remove(CHECKPOINT_PATH)
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training Data-Driven model (31 features)...")
+    st.caption("🔄 Training stable model (31 features)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1113,7 +1111,7 @@ def load_or_train():
         if r2_tensile > best_r2_tensile:
             best_r2_tensile = r2_tensile
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final_31feat.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_stable.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1122,10 +1120,11 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final_31feat.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final_31feat.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_stable.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_stable.pt'), map_location=device))
     model.cpu()
 
+    # Final evaluation
     with torch.no_grad():
         test_pred_scaled = model.predict(torch.tensor(scaler.transform(add_interaction_features(X_test)), dtype=torch.float32))
         test_pred = y_scaler.inverse_transform(test_pred_scaled)
@@ -1301,7 +1300,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — Auto-retrain on mismatch")
+    st.caption("🔬 v29.27-R31 — STABLE (31 features, auto-retrain)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
