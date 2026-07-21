@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Ultimate Kawakita Fix)
+Hubryd AI – v29.27-R31 (Ultimate Kawakita Fix v2)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -289,7 +289,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – ULTIMATE KAWAKITA FIX (very small b)
+# DATA GENERATION – ULTIMATE KAWAKITA FIX v2 (extremely small b)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -325,7 +325,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (ULTIMATE FIX) -----
+    # ----- Density: Hybrid Heckel + Kawakita (ULTIMATE FIX v2) -----
     # Heckel model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
@@ -333,9 +333,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (ULTIMATE FIX: b extremely small, so 1/b is ~900–1500)
+    # Kawakita model (b extremely small → 1/b ~ 9000-15600)
     a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)   # 0.85 ~ 0.90
-    b_kawakita = 0.0005 + 0.0001 * binder_n             # 0.00064 ~ 0.0011
+    b_kawakita = 0.00005 + 0.00001 * binder_n            # 0.000064 ~ 0.00011
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
     D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
@@ -1086,11 +1086,11 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING (new cache file)
+# MODEL TRAINING (new cache file for v2)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_ultimate.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_ultimate_v2.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1109,7 +1109,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training ULTIMATE Kawakita fix (15k samples)...")
+    st.caption("🔄 Training ULTIMATE Kawakita v2 (extremely small b)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1162,7 +1162,7 @@ def load_or_train():
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_ultimate.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1171,8 +1171,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_ultimate.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_ultimate.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_ultimate_v2.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -1343,7 +1343,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R31 — Ultimate Kawakita Fix + Unified Table")
+    st.caption("🔬 v29.27-R31 — Ultimate Kawakita v2 (extremely small b)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
