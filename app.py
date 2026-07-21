@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Final Kawakita Fix)
+Hubryd AI – v29.27-R31 (Ultimate Kawakita Fix)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -289,7 +289,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – FINAL KAWAKITA FIX
+# DATA GENERATION – ULTIMATE KAWAKITA FIX (very small b)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -325,7 +325,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # ----- Density: Hybrid Heckel + Kawakita (FINAL CORRECTION) -----
+    # ----- Density: Hybrid Heckel + Kawakita (ULTIMATE FIX) -----
     # Heckel model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
@@ -333,14 +333,11 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (CORRECTED: b is very small so 1/b is large, yielding realistic densities)
-    # a ranges 0.85 ~ 0.90
-    a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)
-    # b ranges ~0.00128 ~ 0.0022, so 1/b ranges ~454 ~ 781
-    b_kawakita = 0.001 + 0.0002 * binder_n
-    # D = 1 - P / (a*P + 1/b)
+    # Kawakita model (ULTIMATE FIX: b extremely small, so 1/b is ~900–1500)
+    a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)   # 0.85 ~ 0.90
+    b_kawakita = 0.0005 + 0.0001 * binder_n             # 0.00064 ~ 0.0011
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
-    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)  # Now rarely needs clipping
+    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
     # Weighted average (Heckel dominant at high pressure, Kawakita at low)
     pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
@@ -351,7 +348,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile (unchanged)
+    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -408,7 +405,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL (no changes needed)
+# PINN MODEL (unchanged – independent Heckel & Kawakita parameters)
 # ================================================================
 
 class Mish(nn.Module):
@@ -984,7 +981,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# PDF REPORT
+# PDF REPORT (unchanged)
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
@@ -1089,11 +1086,11 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING
+# MODEL TRAINING (new cache file)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_ultimate.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1112,7 +1109,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training FINAL corrected Kawakita model (15k samples)...")
+    st.caption("🔄 Training ULTIMATE Kawakita fix (15k samples)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -1155,7 +1152,7 @@ def load_or_train():
         model.eval()
         with torch.no_grad():
             val_pred_scaled = model.predict(X_val_t)
-            val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]
+            val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]  # tensile
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
             val_r2 = r2_score(val_true, val_pred)
 
@@ -1165,7 +1162,7 @@ def load_or_train():
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_ultimate.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1174,8 +1171,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_ultimate.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_ultimate.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -1346,7 +1343,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R31 — Final Kawakita Fix + Unified Table")
+    st.caption("🔬 v29.27-R31 — Ultimate Kawakita Fix + Unified Table")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1394,7 +1391,8 @@ with col_left:
             st.session_state.binder_grade = binder_grade_idx
 
         total = api + binder + pvpp + mgst + mcc + moisture
-        if abs(total-100) < 0.1:
+        # Tolerance increased to 0.2 to avoid rounding warnings
+        if abs(total-100) < 0.2:
             st.success(f"✅ Total = {total:.2f}%")
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
@@ -1435,7 +1433,7 @@ with col_right:
     if predict_btn:
         if model is None:
             st.error("❌ Model is not available. Please fix training errors and restart.")
-        elif abs(total-100) > 0.1:
+        elif abs(total-100) > 0.2:
             st.warning("⚠️ Formulation must sum to 100%")
         else:
             # Normalise components including moisture
@@ -1677,7 +1675,7 @@ with col_right:
                     "Disintegration (min)": st.column_config.NumberColumn("Disintegration (min)", format="%.1f", width="small"),
                 }
             )
-            st.caption("⚖️ Balanced Golden Solution = Trade-off between API & EFRF | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
+            st.caption("⚖️ Balanced = Trade-off between API & EFRF | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
         else:
             st.info("No optimal solutions available to display.")
 
