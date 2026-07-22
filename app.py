@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (FINAL – Unique Function Name)
+Hubryd AI – v29.27-R31 (NO CACHE – Always Retrain)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -87,9 +87,9 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-# Training parameters
+# Training parameters (reduced for speed)
 N_SAMPLES = 15000
-ADAM_EPOCHS = 500
+ADAM_EPOCHS = 400
 PATIENCE = 60
 NSGA_POP = 80
 NSGA_GENS = 50
@@ -144,36 +144,28 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# UNIQUE FEATURE ENGINEERING – ALWAYS 31 FEATURES
+# EXACT FEATURE ENGINEERING – ALWAYS 31 FEATURES
 # ================================================================
 
-def build_31_features_v2(X_raw):
+def build_exact_31_features(X_raw):
     """
     Build exactly 31 features from 14 raw inputs.
     This function is the SINGLE SOURCE OF TRUTH for feature engineering.
-    UNIQUE NAME to avoid conflicts with any cached code.
     """
     # Ensure 2D array
     if X_raw.ndim == 1:
         X_raw = X_raw.reshape(1, -1)
     
-    # Original 14 features (indices 0-13)
-    # 0: API, 1: MCC, 2: PVPP, 3: MgSt, 4: Binder
-    # 5: Pressure, 6: Speed, 7: Granule, 8: ParticleSize, 9: Moisture
-    # 10: BinderGrade, 11: DwellTime, 12: Friction, 13: DecompressionTime
-    
-    # Extract columns
+    # Extract columns (each is (n,1))
+    pressure = X_raw[:, 5:6]
+    binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
+    speed = X_raw[:, 6:7]
     mcc = X_raw[:, 1:2]
     pvpp = X_raw[:, 2:3]
     mgst = X_raw[:, 3:4]
-    binder = X_raw[:, 4:5]
-    pressure = X_raw[:, 5:6]
-    speed = X_raw[:, 6:7]
-    granule = X_raw[:, 7:8]
     particle_size = X_raw[:, 8:9]
     moisture = X_raw[:, 9:10]
-    binder_grade = X_raw[:, 10:11]  # kept but not used in interactions
     dwell_time = X_raw[:, 11:12]
     friction = X_raw[:, 12:13]
     decompression_time = X_raw[:, 13:14]
@@ -219,9 +211,9 @@ def build_31_features_v2(X_raw):
         friction_pressure
     ], axis=1)
     
-    # Debug: ensure exactly 31 features
+    # VERIFY: exactly 31 features
     if result.shape[1] != 31:
-        raise ValueError(f"build_31_features_v2 returned {result.shape[1]} features, expected 31")
+        raise ValueError(f"build_exact_31_features returned {result.shape[1]} features, expected 31")
     
     return result
 
@@ -261,6 +253,57 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     beta = 1.0 + 0.01 * (particle_size - 50) / 50
     beta = np.clip(beta, 0.8, 2.5)
     return {'tau': tau, 'beta': beta}
+
+def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
+    api = np.asarray(api, dtype=float)
+    binder = np.asarray(binder, dtype=float)
+    pvpp = np.asarray(pvpp, dtype=float)
+    mgst = np.asarray(mgst, dtype=float)
+    mcc = np.asarray(mcc, dtype=float)
+    moisture = np.asarray(moisture, dtype=float)
+
+    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
+    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
+    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
+    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
+    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
+    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+
+    total = api + binder + pvpp + mgst + mcc + moisture
+    total = np.where(total <= 0, 1.0, total)
+
+    api = (api / total) * 100.0
+    binder = (binder / total) * 100.0
+    pvpp = (pvpp / total) * 100.0
+    mgst = (mgst / total) * 100.0
+    mcc = (mcc / total) * 100.0
+    moisture = (moisture / total) * 100.0
+
+    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
+    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
+    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
+    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
+    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
+    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+
+    total2 = api + binder + pvpp + mgst + mcc + moisture
+    total2 = np.where(total2 <= 0, 1.0, total2)
+    scale = 100.0 / total2
+    api = api * scale
+    binder = binder * scale
+    pvpp = pvpp * scale
+    mgst = mgst * scale
+    mcc = mcc * scale
+    moisture = moisture * scale
+
+    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
+    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
+    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
+    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
+    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
+    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+
+    return api, binder, pvpp, mgst, mcc, moisture
 
 # ================================================================
 # DATA GENERATION
@@ -379,57 +422,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     df['Dissolution_Beta'] = dissolution_beta
 
     return df, feature_names
-
-def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
-    api = np.asarray(api, dtype=float)
-    binder = np.asarray(binder, dtype=float)
-    pvpp = np.asarray(pvpp, dtype=float)
-    mgst = np.asarray(mgst, dtype=float)
-    mcc = np.asarray(mcc, dtype=float)
-    moisture = np.asarray(moisture, dtype=float)
-
-    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
-    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
-    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
-    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
-    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
-    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
-
-    total = api + binder + pvpp + mgst + mcc + moisture
-    total = np.where(total <= 0, 1.0, total)
-
-    api = (api / total) * 100.0
-    binder = (binder / total) * 100.0
-    pvpp = (pvpp / total) * 100.0
-    mgst = (mgst / total) * 100.0
-    mcc = (mcc / total) * 100.0
-    moisture = (moisture / total) * 100.0
-
-    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
-    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
-    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
-    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
-    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
-    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
-
-    total2 = api + binder + pvpp + mgst + mcc + moisture
-    total2 = np.where(total2 <= 0, 1.0, total2)
-    scale = 100.0 / total2
-    api = api * scale
-    binder = binder * scale
-    pvpp = pvpp * scale
-    mgst = mgst * scale
-    mcc = mcc * scale
-    moisture = moisture * scale
-
-    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
-    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
-    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
-    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
-    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
-    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
-
-    return api, binder, pvpp, mgst, mcc, moisture
 
 # ================================================================
 # PINN MODEL
@@ -586,9 +578,9 @@ class NSGAII:
         n = population.shape[0]
         repaired = self._repair_batch(population)
         inputs = repaired
-        aug = build_31_features_v2(inputs)
+        aug = build_exact_31_features(inputs)
         if aug.shape[1] != 31:
-            raise ValueError(f"Expected 31 features, got {aug.shape[1]}")
+            raise ValueError(f"NSGA-II: Expected 31 features, got {aug.shape[1]}")
         scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
@@ -775,9 +767,9 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        aug = build_31_features_v2(np.array([inputs]))
+        aug = build_exact_31_features(np.array([inputs]))
         if aug.shape[1] != 31:
-            raise ValueError(f"Expected 31 features, got {aug.shape[1]}")
+            raise ValueError(f"predict_pinn: Expected 31 features, got {aug.shape[1]}")
         scaled = scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
@@ -1064,48 +1056,17 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# TRAIN MODEL (using unique function name)
+# TRAIN MODEL – NO CACHE (Always retrain)
 # ================================================================
 
-CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v31_final_unique.pt')
-
-@st.cache_resource
-def load_or_train():
-    # Try to load from cache
-    if os.path.exists(CHECKPOINT_PATH):
-        try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            # Verify feature count using build_31_features_v2
-            test_raw = np.random.randn(1, 14)
-            test_features = build_31_features_v2(test_raw)
-            expected_dim = test_features.shape[1]
-            
-            if ckpt['input_dim'] == expected_dim:
-                model = MultiTaskPINN(expected_dim, hidden=HIDDEN_SIZE)
-                model.load_state_dict(ckpt['model_state'])
-                scaler = ckpt['scaler']
-                y_scaler = ckpt['y_scaler']
-                features = ckpt['features']
-                df = ckpt['df']
-                st.success("✅ Model loaded from cache!")
-                return model, scaler, y_scaler, features, df
-            else:
-                st.warning(f"Feature mismatch: cache has {ckpt['input_dim']}, expected {expected_dim}. Retraining...")
-                os.remove(CHECKPOINT_PATH)
-        except Exception as e:
-            st.warning(f"Cache load failed: {e}. Retraining...")
-            if os.path.exists(CHECKPOINT_PATH):
-                os.remove(CHECKPOINT_PATH)
-
-    st.caption("🔄 Training final model (unique function name)...")
+def train_model_no_cache():
+    st.caption("🔄 Training model (no cache – always fresh)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     
-    # Use unique function name
-    X_aug = build_31_features_v2(X_raw)
+    X_aug = build_exact_31_features(X_raw)
     n_features = X_aug.shape[1]
     
     if n_features != 31:
@@ -1171,24 +1132,12 @@ def load_or_train():
 
     # Final evaluation
     with torch.no_grad():
-        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_31_features_v2(X_test)), dtype=torch.float32))
+        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_exact_31_features(X_test)), dtype=torch.float32))
         test_pred = y_scaler.inverse_transform(test_pred_scaled)
         test_true = y_scaler.inverse_transform(y_test)
         final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
         final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
     st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
-
-    # Save to cache
-    checkpoint = {
-        'model_state': model.state_dict(),
-        'scaler': scaler,
-        'y_scaler': y_scaler,
-        'features': features,
-        'df': df,
-        'input_dim': n_features
-    }
-    torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success("✅ Model cached for future runs!")
 
     return model, scaler, y_scaler, features, df
 
@@ -1204,8 +1153,8 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
         X_raw_all, y_raw_all, test_size=0.2, random_state=42
     )
-    X_b_train_scaled = scaler.transform(build_31_features_v2(X_b_train))
-    X_b_test_scaled = scaler.transform(build_31_features_v2(X_b_test))
+    X_b_train_scaled = scaler.transform(build_exact_31_features(X_b_train))
+    X_b_test_scaled = scaler.transform(build_exact_31_features(X_b_test))
     y_train_target = y_b_train[:, 0]
     y_test_target = y_b_test[:, 0]
 
@@ -1297,7 +1246,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
         dwell_time, friction, decompression_time
     ])
 
-    aug = build_31_features_v2(inputs)
+    aug = build_exact_31_features(inputs)
     if aug.shape[1] != 31:
         raise ValueError(f"generate_feasible_points: Expected 31 features, got {aug.shape[1]}")
     
@@ -1350,7 +1299,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — UNIQUE FUNCTION NAME (build_31_features_v2)")
+    st.caption("🔬 v29.27-R31 — NO CACHE (Always Retrain)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1366,9 +1315,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
 
-# Load model (with caching)
+# Train model (no cache)
 try:
-    model, scaler, y_scaler, features, df = load_or_train()
+    model, scaler, y_scaler, features, df = train_model_no_cache()
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
