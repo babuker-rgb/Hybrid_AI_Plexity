@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (SIMPLIFIED – 14 Features Only)
+Hubryd AI – v29.27-R31 (FINAL – Cached 31 Features)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -88,9 +88,9 @@ BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
 # Training parameters
-N_SAMPLES = 15000
-ADAM_EPOCHS = 500
-PATIENCE = 80
+N_SAMPLES = 12000
+ADAM_EPOCHS = 400
+PATIENCE = 60
 NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
@@ -144,8 +144,54 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# HELPER FUNCTIONS
+# FIXED FEATURE ENGINEERING – ALWAYS 31 FEATURES
 # ================================================================
+
+def build_features_fixed(X_raw):
+    """Build exactly 31 features – NEVER changes."""
+    if X_raw.ndim == 1:
+        X_raw = X_raw.reshape(1, -1)
+    
+    # Original 14 columns
+    api = X_raw[:, 0:1]
+    mcc = X_raw[:, 1:2]
+    pvpp = X_raw[:, 2:3]
+    mgst = X_raw[:, 3:4]
+    binder = X_raw[:, 4:5]
+    pressure = X_raw[:, 5:6]
+    speed = X_raw[:, 6:7]
+    granule = X_raw[:, 7:8]
+    particle_size = X_raw[:, 8:9]
+    moisture = X_raw[:, 9:10]
+    # binder_grade at index 10 - NOT used in interactions
+    dwell_time = X_raw[:, 11:12]
+    friction = X_raw[:, 12:13]
+    decompression_time = X_raw[:, 13:14]
+    
+    # 17 interaction features
+    pb = pressure * binder
+    pa = pressure * api
+    ps = np.clip(pressure / (speed + 0.1), 0, 1000)
+    am = np.clip(api / (mcc + 0.1), 0, 1000)
+    bs = np.clip(binder / (speed + 0.1), 0, 100)
+    ap = api * pvpp
+    bm = binder * mgst
+    mp = mcc * pvpp
+    a2 = api ** 2
+    p2 = pressure ** 2
+    b2 = binder ** 2
+    s2 = speed ** 2
+    pp = particle_size * pressure
+    mp2 = moisture * pressure
+    pm = particle_size * moisture
+    dp = dwell_time * pressure
+    fp = friction * pressure
+    
+    return np.concatenate([
+        X_raw,
+        pb, pa, ps, am, bs, ap, bm, mp,
+        a2, p2, b2, s2, pp, mp2, pm, dp, fp
+    ], axis=1)
 
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     api = np.asarray(api, dtype=float)
@@ -354,7 +400,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL – SIMPLIFIED (14 features only)
+# PINN MODEL
 # ================================================================
 
 class Mish(nn.Module):
@@ -507,8 +553,8 @@ class NSGAII:
     def _evaluate(self, population):
         n = population.shape[0]
         repaired = self._repair_batch(population)
-        inputs = repaired
-        scaled = self.scaler.transform(inputs)
+        aug = build_features_fixed(repaired)
+        scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
@@ -694,7 +740,8 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        scaled = scaler.transform([inputs])
+        aug = build_features_fixed(np.array([inputs]))
+        scaled = scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
             pred_scaled = model.predict(X_t)[0]
@@ -980,21 +1027,52 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# TRAIN MODEL – NO CACHE
+# TRAIN MODEL – WITH CACHING
 # ================================================================
 
-def train_model_no_cache():
-    st.caption("🔄 Training model (14 features, no cache)...")
+CACHE_DIR = tempfile.gettempdir()
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_final_31_fixed.pt')
+
+@st.cache_resource
+def load_or_train():
+    # Try to load from cache
+    if os.path.exists(CHECKPOINT_PATH):
+        try:
+            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+            # Verify feature count
+            test_raw = np.random.randn(1, 14)
+            test_aug = build_features_fixed(test_raw)
+            expected_dim = test_aug.shape[1]
+            
+            if ckpt['input_dim'] == expected_dim:
+                model = MultiTaskPINN(expected_dim, hidden=HIDDEN_SIZE)
+                model.load_state_dict(ckpt['model_state'])
+                scaler = ckpt['scaler']
+                y_scaler = ckpt['y_scaler']
+                features = ckpt['features']
+                df = ckpt['df']
+                st.success("✅ Model loaded from cache!")
+                return model, scaler, y_scaler, features, df
+            else:
+                st.warning(f"Feature mismatch. Retraining...")
+                os.remove(CHECKPOINT_PATH)
+        except Exception as e:
+            st.warning(f"Cache load failed: {e}. Retraining...")
+            if os.path.exists(CHECKPOINT_PATH):
+                os.remove(CHECKPOINT_PATH)
+
+    st.caption("🔄 Training model (31 features, cached)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     
-    n_features = X_raw.shape[1]  # 14 features
-    st.info(f"✓ Number of features: {n_features}")
+    X_aug = build_features_fixed(X_raw)
+    n_features = X_aug.shape[1]
+    st.info(f"✓ Number of features: {n_features} (expected 31)")
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
+    X_scaled = scaler.fit_transform(X_aug)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
     X_train, X_test, X_raw_train, X_raw_test, y_train, y_test = train_test_split(
@@ -1049,12 +1127,23 @@ def train_model_no_cache():
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
     with torch.no_grad():
-        test_pred_scaled = model.predict(torch.tensor(scaler.transform(X_test), dtype=torch.float32))
+        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_features_fixed(X_test)), dtype=torch.float32))
         test_pred = y_scaler.inverse_transform(test_pred_scaled)
         test_true = y_scaler.inverse_transform(y_test)
         final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
         final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
     st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
+
+    checkpoint = {
+        'model_state': model.state_dict(),
+        'scaler': scaler,
+        'y_scaler': y_scaler,
+        'features': features,
+        'df': df,
+        'input_dim': n_features
+    }
+    torch.save(checkpoint, CHECKPOINT_PATH)
+    st.success("✅ Model cached successfully!")
 
     return model, scaler, y_scaler, features, df
 
@@ -1070,8 +1159,8 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
         X_raw_all, y_raw_all, test_size=0.2, random_state=42
     )
-    X_b_train_scaled = scaler.transform(X_b_train)
-    X_b_test_scaled = scaler.transform(X_b_test)
+    X_b_train_scaled = scaler.transform(build_features_fixed(X_b_train))
+    X_b_test_scaled = scaler.transform(build_features_fixed(X_b_test))
     y_train_target = y_b_train[:, 0]
     y_test_target = y_b_test[:, 0]
 
@@ -1163,7 +1252,8 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
         dwell_time, friction, decompression_time
     ])
 
-    scaled = scaler.transform(inputs)
+    aug = build_features_fixed(inputs)
+    scaled = scaler.transform(aug)
     X_t = torch.tensor(scaled, dtype=torch.float32)
     with torch.no_grad():
         pred_scaled = model.predict(X_t)
@@ -1212,7 +1302,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — SIMPLIFIED (14 features, no cache)")
+    st.caption("🔬 v29.27-R31 — FINAL (31 features, cached)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1228,9 +1318,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
 
-# Train model (no cache)
+# Load model
 try:
-    model, scaler, y_scaler, features, df = train_model_no_cache()
+    model, scaler, y_scaler, features, df = load_or_train()
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
