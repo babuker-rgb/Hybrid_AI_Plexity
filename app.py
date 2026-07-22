@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Definite Fix – 31 features enforced)
+Hubryd AI – v29.27-R31 (FINAL – 31 Features Fixed)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -201,11 +201,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
 def add_interaction_features(X_raw):
     """
     Returns exactly 31 features: 14 original + 17 interactions.
-    This function is critical and must remain unchanged.
+    CRITICAL: This function must always return 31 features.
     """
     # Ensure 2D array
     if X_raw.ndim == 1:
         X_raw = X_raw.reshape(1, -1)
+    
     # Extract columns (each is (n,1))
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
@@ -216,12 +217,11 @@ def add_interaction_features(X_raw):
     mgst = X_raw[:, 3:4]
     particle_size = X_raw[:, 8:9]
     moisture = X_raw[:, 9:10]
-    # binder_grade is not used in interactions (kept as is)
     dwell_time = X_raw[:, 11:12]
     friction = X_raw[:, 12:13]
     decompression_time = X_raw[:, 13:14]
 
-    # 17 interaction features
+    # 17 interaction features (NO binder_grade in interactions)
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -241,7 +241,7 @@ def add_interaction_features(X_raw):
     friction_pressure = friction * pressure
 
     # Concatenate: original 14 columns + 17 interactions = 31
-    return np.concatenate([
+    result = np.concatenate([
         X_raw,
         pressure_binder, pressure_api,
         pressure_speed, api_mcc, binder_speed,
@@ -250,6 +250,12 @@ def add_interaction_features(X_raw):
         particle_pressure, moisture_pressure,
         particle_moisture, dwell_pressure, friction_pressure
     ], axis=1)
+    
+    # Debug: verify shape
+    if result.shape[1] != 31:
+        raise ValueError(f"add_interaction_features returned {result.shape[1]} features, expected 31")
+    
+    return result
 
 def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     if np.isscalar(speed_rpm):
@@ -562,9 +568,11 @@ class NSGAII:
         repaired = self._repair_batch(population)
         inputs = repaired
         aug = add_interaction_features(inputs)
-        # Ensure we have exactly 31 features
+        
+        # CRITICAL: Verify feature count before scaling
         if aug.shape[1] != 31:
-            raise ValueError(f"Expected 31 features, got {aug.shape[1]}. Check add_interaction_features.")
+            raise ValueError(f"NSGA-II._evaluate: Expected 31 features, got {aug.shape[1]}")
+        
         scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
@@ -751,11 +759,12 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        aug = add_interaction_features(np.array([inputs]))[0]
-        # Ensure 31 features
-        if aug.shape[0] != 31:
-            raise ValueError(f"Expected 31 features, got {aug.shape[0]}. Check add_interaction_features.")
-        scaled = scaler.transform([aug])
+        aug = add_interaction_features(np.array([inputs]))
+        # CRITICAL: Verify feature count
+        if aug.shape[1] != 31:
+            raise ValueError(f"predict_pinn: Expected 31 features, got {aug.shape[1]}")
+        
+        scaled = scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
             pred_scaled = model.predict(X_t)[0]
@@ -1041,20 +1050,52 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# TRAIN MODEL (No caching – always retrain)
+# TRAIN MODEL (uses caching to avoid retraining every time)
 # ================================================================
 
-def train_model():
-    st.caption("🔄 Training model (definite 31-feature version)...")
+CACHE_DIR = tempfile.gettempdir()
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_31feat_final.pt')
+
+@st.cache_resource
+def load_or_train():
+    # Try to load from cache
+    if os.path.exists(CHECKPOINT_PATH):
+        try:
+            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+            # Verify feature count matches
+            test_raw = np.random.randn(1, 14)
+            test_aug = add_interaction_features(test_raw)
+            expected_dim = test_aug.shape[1]
+            
+            if ckpt['input_dim'] == expected_dim:
+                model = MultiTaskPINN(expected_dim, hidden=HIDDEN_SIZE)
+                model.load_state_dict(ckpt['model_state'])
+                scaler = ckpt['scaler']
+                y_scaler = ckpt['y_scaler']
+                features = ckpt['features']
+                df = ckpt['df']
+                st.success("✅ Model loaded from cache!")
+                return model, scaler, y_scaler, features, df
+            else:
+                st.warning(f"Feature mismatch: cache has {ckpt['input_dim']}, expected {expected_dim}. Retraining...")
+                os.remove(CHECKPOINT_PATH)
+        except Exception as e:
+            st.warning(f"Cache load failed: {e}. Retraining...")
+            if os.path.exists(CHECKPOINT_PATH):
+                os.remove(CHECKPOINT_PATH)
+
+    st.caption("🔄 Training final 31-feature model...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     X_aug = add_interaction_features(X_raw)
     n_features = X_aug.shape[1]
+    
     if n_features != 31:
-        st.error(f"Critical: add_interaction_features returned {n_features} features, expected 31. Aborting.")
-        raise ValueError(f"Feature count mismatch: {n_features} vs 31")
+        st.error(f"CRITICAL: Expected 31 features, got {n_features}. Aborting.")
+        raise ValueError(f"Feature count: {n_features}")
+    
     st.info(f"✓ Number of features: {n_features} (expected 31)")
 
     scaler = StandardScaler()
@@ -1120,6 +1161,18 @@ def train_model():
         final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
         final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
     st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
+
+    # Save to cache
+    checkpoint = {
+        'model_state': model.state_dict(),
+        'scaler': scaler,
+        'y_scaler': y_scaler,
+        'features': features,
+        'df': df,
+        'input_dim': n_features
+    }
+    torch.save(checkpoint, CHECKPOINT_PATH)
+    st.success("✅ Model cached for future runs!")
 
     return model, scaler, y_scaler, features, df
 
@@ -1229,6 +1282,9 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     ])
 
     aug = add_interaction_features(inputs)
+    if aug.shape[1] != 31:
+        raise ValueError(f"generate_feasible_points: Expected 31 features, got {aug.shape[1]}")
+    
     scaled = scaler.transform(aug)
     X_t = torch.tensor(scaled, dtype=torch.float32)
     with torch.no_grad():
@@ -1278,7 +1334,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — DEFINITE FIX (31 features enforced)")
+    st.caption("🔬 v29.27-R31 — FINAL (31 features, cached)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1294,9 +1350,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
 
-# Train model (always fresh)
+# Load model (with caching)
 try:
-    model, scaler, y_scaler, features, df = train_model()
+    model, scaler, y_scaler, features, df = load_or_train()
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
