@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (DEFINITE – Explicit 31 Features)
+Hubryd AI – v29.27-R31 (FINAL – Unique Function Name)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -144,13 +144,14 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# EXPLICIT FEATURE ENGINEERING – ALWAYS 31 FEATURES
+# UNIQUE FEATURE ENGINEERING – ALWAYS 31 FEATURES
 # ================================================================
 
-def build_features(X_raw):
+def build_31_features_v2(X_raw):
     """
     Build exactly 31 features from 14 raw inputs.
     This function is the SINGLE SOURCE OF TRUTH for feature engineering.
+    UNIQUE NAME to avoid conflicts with any cached code.
     """
     # Ensure 2D array
     if X_raw.ndim == 1:
@@ -197,7 +198,7 @@ def build_features(X_raw):
     friction_pressure = friction * pressure
     
     # Concatenate: 14 original + 17 interactions = 31
-    features = np.concatenate([
+    result = np.concatenate([
         X_raw,  # 14
         pressure_binder,
         pressure_api,
@@ -219,10 +220,10 @@ def build_features(X_raw):
     ], axis=1)
     
     # Debug: ensure exactly 31 features
-    if features.shape[1] != 31:
-        raise ValueError(f"build_features returned {features.shape[1]} features, expected 31")
+    if result.shape[1] != 31:
+        raise ValueError(f"build_31_features_v2 returned {result.shape[1]} features, expected 31")
     
-    return features
+    return result
 
 def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     if np.isscalar(speed_rpm):
@@ -585,7 +586,7 @@ class NSGAII:
         n = population.shape[0]
         repaired = self._repair_batch(population)
         inputs = repaired
-        aug = build_features(inputs)
+        aug = build_31_features_v2(inputs)
         if aug.shape[1] != 31:
             raise ValueError(f"Expected 31 features, got {aug.shape[1]}")
         scaled = self.scaler.transform(aug)
@@ -774,7 +775,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        aug = build_features(np.array([inputs]))
+        aug = build_31_features_v2(np.array([inputs]))
         if aug.shape[1] != 31:
             raise ValueError(f"Expected 31 features, got {aug.shape[1]}")
         scaled = scaler.transform(aug)
@@ -1063,11 +1064,11 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# TRAIN MODEL (using explicit feature engineering)
+# TRAIN MODEL (using unique function name)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_final_31_explicit.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v31_final_unique.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1075,9 +1076,9 @@ def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            # Verify feature count using build_features
+            # Verify feature count using build_31_features_v2
             test_raw = np.random.randn(1, 14)
-            test_features = build_features(test_raw)
+            test_features = build_31_features_v2(test_raw)
             expected_dim = test_features.shape[1]
             
             if ckpt['input_dim'] == expected_dim:
@@ -1097,14 +1098,14 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training final model (explicit 31 features)...")
+    st.caption("🔄 Training final model (unique function name)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     
-    # Use build_features instead of add_interaction_features
-    X_aug = build_features(X_raw)
+    # Use unique function name
+    X_aug = build_31_features_v2(X_raw)
     n_features = X_aug.shape[1]
     
     if n_features != 31:
@@ -1170,7 +1171,7 @@ def load_or_train():
 
     # Final evaluation
     with torch.no_grad():
-        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_features(X_test)), dtype=torch.float32))
+        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_31_features_v2(X_test)), dtype=torch.float32))
         test_pred = y_scaler.inverse_transform(test_pred_scaled)
         test_true = y_scaler.inverse_transform(y_test)
         final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
@@ -1203,8 +1204,8 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
         X_raw_all, y_raw_all, test_size=0.2, random_state=42
     )
-    X_b_train_scaled = scaler.transform(build_features(X_b_train))
-    X_b_test_scaled = scaler.transform(build_features(X_b_test))
+    X_b_train_scaled = scaler.transform(build_31_features_v2(X_b_train))
+    X_b_test_scaled = scaler.transform(build_31_features_v2(X_b_test))
     y_train_target = y_b_train[:, 0]
     y_test_target = y_b_test[:, 0]
 
@@ -1296,7 +1297,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
         dwell_time, friction, decompression_time
     ])
 
-    aug = build_features(inputs)
+    aug = build_31_features_v2(inputs)
     if aug.shape[1] != 31:
         raise ValueError(f"generate_feasible_points: Expected 31 features, got {aug.shape[1]}")
     
@@ -1349,7 +1350,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — FINAL (explicit 31 features)")
+    st.caption("🔬 v29.27-R31 — UNIQUE FUNCTION NAME (build_31_features_v2)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
