@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Stable – 31 Features Fixed)
+Hubryd AI – v29.27-R31 (No Cache – Always Retrain)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -87,9 +87,10 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-N_SAMPLES = 20000
-ADAM_EPOCHS = 800
-PATIENCE = 80
+# Training parameters (reduced for speed)
+N_SAMPLES = 15000          # 15k samples (faster)
+ADAM_EPOCHS = 500          # fewer epochs (still enough)
+PATIENCE = 60
 NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
@@ -312,7 +313,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # Density: Physical model
+    # Density: Physical model (no random noise)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
@@ -1025,45 +1026,24 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING
+# TRAIN MODEL (No caching – always retrain)
 # ================================================================
 
-CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_stable_31feat.pt')
-
-@st.cache_resource
-def load_or_train():
-    # Check if cache exists and is valid
-    if os.path.exists(CHECKPOINT_PATH):
-        try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            # Verify feature count matches
-            test_raw = np.random.randn(1, 14)
-            test_aug = add_interaction_features(test_raw)
-            expected_dim = test_aug.shape[1]
-            if ckpt['input_dim'] == expected_dim:
-                model = MultiTaskPINN(expected_dim, hidden=HIDDEN_SIZE)
-                model.load_state_dict(ckpt['model_state'])
-                scaler = ckpt['scaler']
-                y_scaler = ckpt['y_scaler']
-                features = ckpt['features']
-                df = ckpt['df']
-                return model, scaler, y_scaler, features, df
-            else:
-                st.warning(f"Feature mismatch: cache has {ckpt['input_dim']}, expected {expected_dim}. Retraining...")
-                os.remove(CHECKPOINT_PATH)
-        except Exception as e:
-            st.warning(f"Cache load failed: {e}. Retraining...")
-            if os.path.exists(CHECKPOINT_PATH):
-                os.remove(CHECKPOINT_PATH)
-
-    st.caption("🔄 Training stable model (31 features)...")
+def train_model():
+    st.caption("🔄 Training model (no cache – always fresh)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     X_aug = add_interaction_features(X_raw)
-    input_dim = X_aug.shape[1]
+    
+    # Verify feature count
+    n_features = X_aug.shape[1]
+    st.info(f"Number of features: {n_features} (should be 31)")
+    if n_features != 31:
+        st.warning(f"Feature count is {n_features}, but expected 31. The model may not work correctly.")
+
+    input_dim = n_features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_aug)
     y_scaler = StandardScaler()
@@ -1111,7 +1091,6 @@ def load_or_train():
         if r2_tensile > best_r2_tensile:
             best_r2_tensile = r2_tensile
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_stable.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -1119,10 +1098,6 @@ def load_or_train():
                 break
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
-
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_stable.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_stable.pt'), map_location=device))
-    model.cpu()
 
     # Final evaluation
     with torch.no_grad():
@@ -1133,16 +1108,7 @@ def load_or_train():
         final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
     st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
 
-    checkpoint = {
-        'model_state': model.state_dict(),
-        'scaler': scaler,
-        'y_scaler': y_scaler,
-        'features': features,
-        'df': df,
-        'input_dim': input_dim
-    }
-    torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success("✅ Model trained and cached successfully!")
+    # Return model and scalers
     return model, scaler, y_scaler, features, df
 
 # ================================================================
@@ -1300,7 +1266,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — STABLE (31 features, auto-retrain)")
+    st.caption("🔬 v29.27-R31 — No Cache, Always Retrain")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1316,9 +1282,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
 
-# Load model
+# Train model (always fresh)
 try:
-    model, scaler, y_scaler, features, df = load_or_train()
+    model, scaler, y_scaler, features, df = train_model()
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
@@ -1348,7 +1314,7 @@ with col_left:
             st.session_state.binder_grade = binder_grade_idx
 
         total = api + binder + pvpp + mgst + mcc + moisture
-        if abs(total-100) < 0.5:
+        if abs(total-100) < 1.0:   # tolerance 1%
             st.success(f"✅ Total = {total:.2f}%")
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
@@ -1389,8 +1355,8 @@ with col_right:
     if predict_btn:
         if model is None:
             st.error("❌ Model is not available. Please fix training errors and restart.")
-        elif abs(total-100) > 0.5:
-            st.warning("⚠️ Formulation must sum to 100%")
+        elif abs(total-100) > 1.0:
+            st.warning("⚠️ Formulation must sum to 100% (within 1%)")
         else:
             api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
                 api, binder, pvpp, mgst, mcc, moisture
