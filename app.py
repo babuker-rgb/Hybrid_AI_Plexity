@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (FINAL – 14 Features, Guaranteed to Work)
+Hubryd AI – v29.27-R31 (ENHANCED – 19 Features + Larger Network)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -87,13 +87,13 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-# Training parameters
-N_SAMPLES = 15000
-ADAM_EPOCHS = 600
-PATIENCE = 80
+# Training parameters (ENHANCED)
+N_SAMPLES = 25000
+ADAM_EPOCHS = 800
+PATIENCE = 100
 NSGA_POP = 80
 NSGA_GENS = 50
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 512
 
 # Loss weights
 W_DENSITY = 1.0
@@ -236,7 +236,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – 14 FEATURES ONLY
+# DATA GENERATION – ENHANCED (19 features)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -262,14 +262,17 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     decompression_time_raw = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, n_samples)
     granule_raw = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, n_samples)
 
-    X = np.column_stack([
+    # Base features (14)
+    X_base = np.column_stack([
         api_n, mcc_n, pvpp_n, mgst_n, binder_n,
         pressure_raw, speed_raw, granule_raw,
         particle_size_raw, moisture_n, binder_grade_raw,
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # Density: Physical model
+    # ================================================================
+    # DENSITY: Physical model (no random noise)
+    # ================================================================
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
@@ -301,7 +304,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += moisture_effect + particle_effect + speed_effect + mgst_effect
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile Strength
+    # ================================================================
+    # TENSILE STRENGTH
+    # ================================================================
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -321,7 +326,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
                 mgst_effect * pvpp_effect * speed_effect * particle_effect)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # Elastic Recovery
+    # ================================================================
+    # ELASTIC RECOVERY
+    # ================================================================
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0 +
@@ -329,7 +336,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er_base = er_base * (1.0 - 0.15 * (D - 0.4))
     er = np.clip(er_base, 0.5, 4.0)
 
-    # Disintegration & Dissolution
+    # ================================================================
+    # DISINTEGRATION & DISSOLUTION
+    # ================================================================
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_n)
     disintegration = np.clip(disintegration, 1.0, 30.0)
 
@@ -337,13 +346,33 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     dissolution_tau = np.clip(dissolution_params['tau'], 2.0, 20.0)
     dissolution_beta = np.clip(dissolution_params['beta'], 0.8, 2.5)
 
+    # ================================================================
+    # ADD INTERACTION FEATURES (5 additional)
+    # ================================================================
+    api_binder = api_n * binder_n
+    pressure_binder = pressure_raw * binder_n
+    api_mcc = api_n * mcc_n
+    pressure_speed = pressure_raw * speed_raw
+    binder_mgst = binder_n * mgst_n
+
+    X_enhanced = np.column_stack([
+        X_base,
+        api_binder,
+        pressure_binder,
+        api_mcc,
+        pressure_speed,
+        binder_mgst
+    ])  # Now 19 features
+
     feature_names = [
         'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
         'Particle_Size_µm', 'Moisture_%', 'Binder_Grade',
-        'Dwell_Time_ms', 'Friction', 'Decompression_Time_ms'
+        'Dwell_Time_ms', 'Friction', 'Decompression_Time_ms',
+        'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
-    df = pd.DataFrame(X, columns=feature_names)
+    
+    df = pd.DataFrame(X_enhanced, columns=feature_names)
     df['Density'] = D
     df['Tensile_Strength_MPa'] = strength
     df['Elastic_Recovery_%'] = er
@@ -354,7 +383,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL – 14 FEATURES ONLY
+# PINN MODEL – ENHANCED (3 residual blocks)
 # ================================================================
 
 class Mish(nn.Module):
@@ -384,6 +413,7 @@ class MultiTaskPINN(nn.Module):
         self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish(), nn.Dropout(0.05))
         self.res1 = ResidualBlock(hidden, dropout=0.05)
         self.res2 = ResidualBlock(hidden, dropout=0.05)
+        self.res3 = ResidualBlock(hidden, dropout=0.05)  # Third residual block
         self.transition = nn.Sequential(
             nn.Linear(hidden, hidden//2),
             nn.Tanh(),
@@ -395,6 +425,7 @@ class MultiTaskPINN(nn.Module):
         x = self.input_layer(X)
         x = self.res1(x)
         x = self.res2(x)
+        x = self.res3(x)
         x = self.transition(x)
         raw = self.output(x)
 
@@ -507,7 +538,36 @@ class NSGAII:
     def _evaluate(self, population):
         n = population.shape[0]
         repaired = self._repair_batch(population)
-        scaled = self.scaler.transform(repaired)
+        
+        # Build 19 features for evaluation
+        api = repaired[:, 0:1]
+        mcc = repaired[:, 1:2]
+        pvpp = repaired[:, 2:3]
+        mgst = repaired[:, 3:4]
+        binder = repaired[:, 4:5]
+        pressure = repaired[:, 5:6]
+        speed = repaired[:, 6:7]
+        granule = repaired[:, 7:8]
+        particle_size = repaired[:, 8:9]
+        moisture = repaired[:, 9:10]
+        binder_grade = repaired[:, 10:11]
+        dwell_time = repaired[:, 11:12]
+        friction = repaired[:, 12:13]
+        decompression_time = repaired[:, 13:14]
+        
+        # Interaction features
+        api_binder = api * binder
+        pressure_binder = pressure * binder
+        api_mcc = api * mcc
+        pressure_speed = pressure * speed
+        binder_mgst = binder * mgst
+        
+        X_eval = np.concatenate([
+            repaired,
+            api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
+        ], axis=1)
+        
+        scaled = self.scaler.transform(X_eval)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
@@ -693,7 +753,23 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        scaled = scaler.transform([inputs])
+        # Build 19 features for prediction
+        api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = inputs
+        
+        # Interaction features
+        api_binder = api * binder
+        pressure_binder = pressure * binder
+        api_mcc = api * mcc
+        pressure_speed = pressure * speed
+        binder_mgst = binder * mgst
+        
+        X_input = np.array([[
+            api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+            particle_size, moisture, binder_grade, dwell_time, friction, decompression_time,
+            api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
+        ]])
+        
+        scaled = scaler.transform(X_input)
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
             pred_scaled = model.predict(X_t)[0]
@@ -711,7 +787,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 # ================================================================
-# PLOTTING FUNCTIONS
+# PLOTTING FUNCTIONS (unchanged)
 # ================================================================
 
 def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
@@ -991,8 +1067,36 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
         return pd.DataFrame(), []
     X_raw_all = df[features].values
     y_raw_all = df[['Tensile_Strength_MPa']].values
+    
+    # Build 19 features for comparison
+    api = X_raw_all[:, 0:1]
+    mcc = X_raw_all[:, 1:2]
+    pvpp = X_raw_all[:, 2:3]
+    mgst = X_raw_all[:, 3:4]
+    binder = X_raw_all[:, 4:5]
+    pressure = X_raw_all[:, 5:6]
+    speed = X_raw_all[:, 6:7]
+    granule = X_raw_all[:, 7:8]
+    particle_size = X_raw_all[:, 8:9]
+    moisture = X_raw_all[:, 9:10]
+    binder_grade = X_raw_all[:, 10:11]
+    dwell_time = X_raw_all[:, 11:12]
+    friction = X_raw_all[:, 12:13]
+    decompression_time = X_raw_all[:, 13:14]
+    
+    api_binder = api * binder
+    pressure_binder = pressure * binder
+    api_mcc = api * mcc
+    pressure_speed = pressure * speed
+    binder_mgst = binder * mgst
+    
+    X_all = np.concatenate([
+        X_raw_all,
+        api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
+    ], axis=1)
+    
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
-        X_raw_all, y_raw_all, test_size=0.2, random_state=42
+        X_all, y_raw_all, test_size=0.2, random_state=42
     )
     X_b_train_scaled = scaler.transform(X_b_train)
     X_b_test_scaled = scaler.transform(X_b_test)
@@ -1080,11 +1184,20 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
         api, binder, pvpp, mgst, mcc, moisture
     )
+    
+    # Build 19 features
+    api_binder = api_n * binder_n
+    pressure_binder = pressure * binder_n
+    api_mcc = api_n * mcc_n
+    pressure_speed = pressure * speed
+    binder_mgst = binder_n * mgst_n
+    
     inputs = np.column_stack([
         api_n, mcc_n, pvpp_n, mgst_n, binder_n,
         pressure, speed, granule,
         particle_size, moisture_n, binder_grade,
-        dwell_time, friction, decompression_time
+        dwell_time, friction, decompression_time,
+        api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
     ])
 
     scaled = scaler.transform(inputs)
@@ -1108,11 +1221,11 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
 
 # ================================================================
-# TRAIN MODEL – WITH CACHING (14 features)
+# TRAIN MODEL – WITH CACHING (19 features)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_14features_final.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_19features_enhanced.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1133,7 +1246,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training model (14 features, cached)...")
+    st.caption("🔄 Training enhanced model (19 features, 25k samples)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     n_features = X_raw.shape[1]
@@ -1245,7 +1358,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — 14 FEATURES (Guaranteed to work)")
+    st.caption("🔬 v29.27-R31 — ENHANCED (19 features, 25k samples)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
