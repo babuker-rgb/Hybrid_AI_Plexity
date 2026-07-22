@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (No Cache – Always Retrain)
+Hubryd AI – v29.27-R31 (Definite Fix – 31 features enforced)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -87,9 +87,9 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-# Training parameters (reduced for speed)
-N_SAMPLES = 15000          # 15k samples (faster)
-ADAM_EPOCHS = 500          # fewer epochs (still enough)
+# Training parameters
+N_SAMPLES = 15000
+ADAM_EPOCHS = 500
 PATIENCE = 60
 NSGA_POP = 80
 NSGA_GENS = 50
@@ -199,7 +199,14 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     return api, binder, pvpp, mgst, mcc, moisture
 
 def add_interaction_features(X_raw):
-    """Returns exactly 31 features: 14 original + 17 interactions."""
+    """
+    Returns exactly 31 features: 14 original + 17 interactions.
+    This function is critical and must remain unchanged.
+    """
+    # Ensure 2D array
+    if X_raw.ndim == 1:
+        X_raw = X_raw.reshape(1, -1)
+    # Extract columns (each is (n,1))
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -209,11 +216,12 @@ def add_interaction_features(X_raw):
     mgst = X_raw[:, 3:4]
     particle_size = X_raw[:, 8:9]
     moisture = X_raw[:, 9:10]
-    binder_grade = X_raw[:, 10:11]
+    # binder_grade is not used in interactions (kept as is)
     dwell_time = X_raw[:, 11:12]
     friction = X_raw[:, 12:13]
     decompression_time = X_raw[:, 13:14]
 
+    # 17 interaction features
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -232,6 +240,7 @@ def add_interaction_features(X_raw):
     dwell_pressure = dwell_time * pressure
     friction_pressure = friction * pressure
 
+    # Concatenate: original 14 columns + 17 interactions = 31
     return np.concatenate([
         X_raw,
         pressure_binder, pressure_api,
@@ -553,6 +562,9 @@ class NSGAII:
         repaired = self._repair_batch(population)
         inputs = repaired
         aug = add_interaction_features(inputs)
+        # Ensure we have exactly 31 features
+        if aug.shape[1] != 31:
+            raise ValueError(f"Expected 31 features, got {aug.shape[1]}. Check add_interaction_features.")
         scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
@@ -740,6 +752,9 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
         aug = add_interaction_features(np.array([inputs]))[0]
+        # Ensure 31 features
+        if aug.shape[0] != 31:
+            raise ValueError(f"Expected 31 features, got {aug.shape[0]}. Check add_interaction_features.")
         scaled = scaler.transform([aug])
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
@@ -1030,20 +1045,18 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
 # ================================================================
 
 def train_model():
-    st.caption("🔄 Training model (no cache – always fresh)...")
+    st.caption("🔄 Training model (definite 31-feature version)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     X_aug = add_interaction_features(X_raw)
-    
-    # Verify feature count
     n_features = X_aug.shape[1]
-    st.info(f"Number of features: {n_features} (should be 31)")
     if n_features != 31:
-        st.warning(f"Feature count is {n_features}, but expected 31. The model may not work correctly.")
+        st.error(f"Critical: add_interaction_features returned {n_features} features, expected 31. Aborting.")
+        raise ValueError(f"Feature count mismatch: {n_features} vs 31")
+    st.info(f"✓ Number of features: {n_features} (expected 31)")
 
-    input_dim = n_features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_aug)
     y_scaler = StandardScaler()
@@ -1052,7 +1065,7 @@ def train_model():
         X_scaled, X_raw, y_scaled, test_size=0.2, random_state=42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
-    model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE).to(device)
+    model = MultiTaskPINN(n_features, hidden=HIDDEN_SIZE).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
 
@@ -1108,7 +1121,6 @@ def train_model():
         final_r2_density = r2_score(test_true[:, 0], test_pred[:, 0])
     st.success(f"✅ Final R² Tensile: {final_r2_tensile:.4f} | Density: {final_r2_density:.4f}")
 
-    # Return model and scalers
     return model, scaler, y_scaler, features, df
 
 # ================================================================
@@ -1266,7 +1278,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — No Cache, Always Retrain")
+    st.caption("🔬 v29.27-R31 — DEFINITE FIX (31 features enforced)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
@@ -1314,7 +1326,7 @@ with col_left:
             st.session_state.binder_grade = binder_grade_idx
 
         total = api + binder + pvpp + mgst + mcc + moisture
-        if abs(total-100) < 1.0:   # tolerance 1%
+        if abs(total-100) < 0.5:
             st.success(f"✅ Total = {total:.2f}%")
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
@@ -1355,8 +1367,8 @@ with col_right:
     if predict_btn:
         if model is None:
             st.error("❌ Model is not available. Please fix training errors and restart.")
-        elif abs(total-100) > 1.0:
-            st.warning("⚠️ Formulation must sum to 100% (within 1%)")
+        elif abs(total-100) > 0.5:
+            st.warning("⚠️ Formulation must sum to 100% (within 0.5%)")
         else:
             api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
                 api, binder, pvpp, mgst, mcc, moisture
