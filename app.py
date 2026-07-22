@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (NO CACHE – Always Retrain)
+Hubryd AI – v29.27-R31 (SIMPLIFIED – 14 Features Only)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -87,15 +87,15 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-# Training parameters (reduced for speed)
+# Training parameters
 N_SAMPLES = 15000
-ADAM_EPOCHS = 400
-PATIENCE = 60
+ADAM_EPOCHS = 500
+PATIENCE = 80
 NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
 
-# Loss weights (no physics loss)
+# Loss weights
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
@@ -144,115 +144,8 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# EXACT FEATURE ENGINEERING – ALWAYS 31 FEATURES
+# HELPER FUNCTIONS
 # ================================================================
-
-def build_exact_31_features(X_raw):
-    """
-    Build exactly 31 features from 14 raw inputs.
-    This function is the SINGLE SOURCE OF TRUTH for feature engineering.
-    """
-    # Ensure 2D array
-    if X_raw.ndim == 1:
-        X_raw = X_raw.reshape(1, -1)
-    
-    # Extract columns (each is (n,1))
-    pressure = X_raw[:, 5:6]
-    binder = X_raw[:, 4:5]
-    api = X_raw[:, 0:1]
-    speed = X_raw[:, 6:7]
-    mcc = X_raw[:, 1:2]
-    pvpp = X_raw[:, 2:3]
-    mgst = X_raw[:, 3:4]
-    particle_size = X_raw[:, 8:9]
-    moisture = X_raw[:, 9:10]
-    dwell_time = X_raw[:, 11:12]
-    friction = X_raw[:, 12:13]
-    decompression_time = X_raw[:, 13:14]
-    
-    # 17 interaction features (EXACTLY 17)
-    pressure_binder = pressure * binder
-    pressure_api = pressure * api
-    pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
-    api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
-    binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
-    api_pvpp = api * pvpp
-    binder_mgst = binder * mgst
-    mcc_pvpp = mcc * pvpp
-    api2 = api ** 2
-    pressure2 = pressure ** 2
-    binder2 = binder ** 2
-    speed2 = speed ** 2
-    particle_pressure = particle_size * pressure
-    moisture_pressure = moisture * pressure
-    particle_moisture = particle_size * moisture
-    dwell_pressure = dwell_time * pressure
-    friction_pressure = friction * pressure
-    
-    # Concatenate: 14 original + 17 interactions = 31
-    result = np.concatenate([
-        X_raw,  # 14
-        pressure_binder,
-        pressure_api,
-        pressure_speed,
-        api_mcc,
-        binder_speed,
-        api_pvpp,
-        binder_mgst,
-        mcc_pvpp,
-        api2,
-        pressure2,
-        binder2,
-        speed2,
-        particle_pressure,
-        moisture_pressure,
-        particle_moisture,
-        dwell_pressure,
-        friction_pressure
-    ], axis=1)
-    
-    # VERIFY: exactly 31 features
-    if result.shape[1] != 31:
-        raise ValueError(f"build_exact_31_features returned {result.shape[1]} features, expected 31")
-    
-    return result
-
-def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
-    if np.isscalar(speed_rpm):
-        speed_rpm = np.array([speed_rpm])
-    speed_rpm = np.asarray(speed_rpm)
-    result = np.full_like(speed_rpm, 50.0, dtype=float)
-    mask = speed_rpm > 0
-    result[mask] = (punch_width * 60 * 1000) / (np.pi * pitch_diameter * speed_rpm[mask])
-    result = np.clip(result, 5.0, 80.0)
-    return result
-
-def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
-    tensile = np.asarray(tensile)
-    pvpp_n = np.asarray(pvpp_n)
-    api_n = np.asarray(api_n)
-    binder_n = np.asarray(binder_n)
-    moisture_n = np.asarray(moisture_n)
-
-    base_time = 2.0 + 0.5 * tensile
-    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
-    api_effect = 0.1 * (api_n - 80)
-    binder_effect = 0.2 * (binder_n - 2.0)
-    moisture_effect = -0.1 * moisture_n
-    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
-    return np.clip(time, 1.0, 30.0)
-
-def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    api_n = np.asarray(api_n)
-    pvpp_n = np.asarray(pvpp_n)
-    particle_size = np.asarray(particle_size)
-    disintegration_time = np.asarray(disintegration_time)
-
-    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = 1.0 + 0.01 * (particle_size - 50) / 50
-    beta = np.clip(beta, 0.8, 2.5)
-    return {'tau': tau, 'beta': beta}
 
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     api = np.asarray(api, dtype=float)
@@ -305,6 +198,43 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
 
     return api, binder, pvpp, mgst, mcc, moisture
 
+def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
+    if np.isscalar(speed_rpm):
+        speed_rpm = np.array([speed_rpm])
+    speed_rpm = np.asarray(speed_rpm)
+    result = np.full_like(speed_rpm, 50.0, dtype=float)
+    mask = speed_rpm > 0
+    result[mask] = (punch_width * 60 * 1000) / (np.pi * pitch_diameter * speed_rpm[mask])
+    result = np.clip(result, 5.0, 80.0)
+    return result
+
+def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
+    tensile = np.asarray(tensile)
+    pvpp_n = np.asarray(pvpp_n)
+    api_n = np.asarray(api_n)
+    binder_n = np.asarray(binder_n)
+    moisture_n = np.asarray(moisture_n)
+
+    base_time = 2.0 + 0.5 * tensile
+    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
+    api_effect = 0.1 * (api_n - 80)
+    binder_effect = 0.2 * (binder_n - 2.0)
+    moisture_effect = -0.1 * moisture_n
+    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
+    return np.clip(time, 1.0, 30.0)
+
+def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
+    api_n = np.asarray(api_n)
+    pvpp_n = np.asarray(pvpp_n)
+    particle_size = np.asarray(particle_size)
+    disintegration_time = np.asarray(disintegration_time)
+
+    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
+    tau = np.clip(tau, 2.0, 20.0)
+    beta = 1.0 + 0.01 * (particle_size - 50) / 50
+    beta = np.clip(beta, 0.8, 2.5)
+    return {'tau': tau, 'beta': beta}
+
 # ================================================================
 # DATA GENERATION
 # ================================================================
@@ -339,7 +269,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # Density: Physical model (no random noise)
+    # Density: Physical model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
@@ -424,7 +354,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL
+# PINN MODEL – SIMPLIFIED (14 features only)
 # ================================================================
 
 class Mish(nn.Module):
@@ -578,10 +508,7 @@ class NSGAII:
         n = population.shape[0]
         repaired = self._repair_batch(population)
         inputs = repaired
-        aug = build_exact_31_features(inputs)
-        if aug.shape[1] != 31:
-            raise ValueError(f"NSGA-II: Expected 31 features, got {aug.shape[1]}")
-        scaled = self.scaler.transform(aug)
+        scaled = self.scaler.transform(inputs)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
@@ -767,10 +694,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        aug = build_exact_31_features(np.array([inputs]))
-        if aug.shape[1] != 31:
-            raise ValueError(f"predict_pinn: Expected 31 features, got {aug.shape[1]}")
-        scaled = scaler.transform(aug)
+        scaled = scaler.transform([inputs])
         X_t = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
             pred_scaled = model.predict(X_t)[0]
@@ -1056,27 +980,21 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# TRAIN MODEL – NO CACHE (Always retrain)
+# TRAIN MODEL – NO CACHE
 # ================================================================
 
 def train_model_no_cache():
-    st.caption("🔄 Training model (no cache – always fresh)...")
+    st.caption("🔄 Training model (14 features, no cache)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     
-    X_aug = build_exact_31_features(X_raw)
-    n_features = X_aug.shape[1]
-    
-    if n_features != 31:
-        st.error(f"CRITICAL: Expected 31 features, got {n_features}. Aborting.")
-        raise ValueError(f"Feature count: {n_features}")
-    
-    st.info(f"✓ Number of features: {n_features} (expected 31)")
+    n_features = X_raw.shape[1]  # 14 features
+    st.info(f"✓ Number of features: {n_features}")
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_aug)
+    X_scaled = scaler.fit_transform(X_raw)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
     X_train, X_test, X_raw_train, X_raw_test, y_train, y_test = train_test_split(
@@ -1130,9 +1048,8 @@ def train_model_no_cache():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    # Final evaluation
     with torch.no_grad():
-        test_pred_scaled = model.predict(torch.tensor(scaler.transform(build_exact_31_features(X_test)), dtype=torch.float32))
+        test_pred_scaled = model.predict(torch.tensor(scaler.transform(X_test), dtype=torch.float32))
         test_pred = y_scaler.inverse_transform(test_pred_scaled)
         test_true = y_scaler.inverse_transform(y_test)
         final_r2_tensile = r2_score(test_true[:, 1], test_pred[:, 1])
@@ -1153,8 +1070,8 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
         X_raw_all, y_raw_all, test_size=0.2, random_state=42
     )
-    X_b_train_scaled = scaler.transform(build_exact_31_features(X_b_train))
-    X_b_test_scaled = scaler.transform(build_exact_31_features(X_b_test))
+    X_b_train_scaled = scaler.transform(X_b_train)
+    X_b_test_scaled = scaler.transform(X_b_test)
     y_train_target = y_b_train[:, 0]
     y_test_target = y_b_test[:, 0]
 
@@ -1246,11 +1163,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
         dwell_time, friction, decompression_time
     ])
 
-    aug = build_exact_31_features(inputs)
-    if aug.shape[1] != 31:
-        raise ValueError(f"generate_feasible_points: Expected 31 features, got {aug.shape[1]}")
-    
-    scaled = scaler.transform(aug)
+    scaled = scaler.transform(inputs)
     X_t = torch.tensor(scaled, dtype=torch.float32)
     with torch.no_grad():
         pred_scaled = model.predict(X_t)
@@ -1299,7 +1212,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50 (3 objectives)
     """)
-    st.caption("🔬 v29.27-R31 — NO CACHE (Always Retrain)")
+    st.caption("🔬 v29.27-R31 — SIMPLIFIED (14 features, no cache)")
 
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
