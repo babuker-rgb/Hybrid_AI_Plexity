@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Final Kawakita Fix)
+Hubryd AI – v29.27-R31 (Final Kawakita Fix) – SPEED OPTIMIZED
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -74,7 +74,7 @@ SLIDER_DECOMPRESSION_TIME_MAX = 80.0
 SLIDER_PARTICLE_SIZE_MIN = 10.0
 SLIDER_PARTICLE_SIZE_MAX = 200.0
 
-# NSGA-II bounds
+# NSGA-II bounds (unchanged)
 BOUND_MCC_MIN = 2.0
 BOUND_MCC_MAX = 8.0
 BOUND_PVPP_MIN = 1.5
@@ -94,11 +94,12 @@ BOUND_GRANULE_MAX = 250.0
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
 PATIENCE = 80
-NSGA_POP = 80
-NSGA_GENS = 50
+# Default NSGA‑II – can be overridden by sidebar sliders
+DEFAULT_NSGA_POP = 40
+DEFAULT_NSGA_GENS = 30
 HIDDEN_SIZE = 256
 
-# Loss weights
+# Loss weights (unchanged)
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
@@ -147,7 +148,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# SAFE HELPER FUNCTIONS
+# SAFE HELPER FUNCTIONS (unchanged)
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
@@ -289,7 +290,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return {'tau': tau, 'beta': beta}
 
 # ================================================================
-# DATA GENERATION – FINAL KAWAKITA FIX
+# DATA GENERATION – FINAL KAWAKITA FIX (unchanged)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -333,16 +334,13 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (CORRECTED: b is very small so 1/b is large, yielding realistic densities)
-    # a ranges 0.85 ~ 0.90
+    # Kawakita model (CORRECTED)
     a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)
-    # b ranges ~0.00128 ~ 0.0022, so 1/b ranges ~454 ~ 781
     b_kawakita = 0.001 + 0.0002 * binder_n
-    # D = 1 - P / (a*P + 1/b)
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
-    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)  # Now rarely needs clipping
+    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
-    # Weighted average (Heckel dominant at high pressure, Kawakita at low)
+    # Weighted average
     pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
     w_heckel = pressure_norm
     w_kawakita = 1.0 - pressure_norm
@@ -351,7 +349,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile (unchanged)
+    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -408,7 +406,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL (no changes needed)
+# PINN MODEL (unchanged)
 # ================================================================
 
 class Mish(nn.Module):
@@ -465,7 +463,7 @@ class MultiTaskPINN(nn.Module):
 
     def predict(self, X_scaled):
         self.eval()
-        with torch.no_grad():
+        with torch.inference_mode():  # faster than no_grad
             if not isinstance(X_scaled, torch.Tensor):
                 X_scaled = torch.tensor(X_scaled, dtype=torch.float32)
             device = next(self.parameters()).device
@@ -519,7 +517,7 @@ class MultiTaskPINN(nn.Module):
         heckel_rhs = k_heckel_pred * pressure + A_heckel_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # 2. Kawakita (P/ε = a*P + 1/b)
+        # 2. Kawakita
         epsilon = 1.0 - density_real
         epsilon = torch.clamp(epsilon, min=1e-4)
         kawakita_lhs = pressure / epsilon
@@ -558,11 +556,11 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II (unchanged, but we'll add adjustable pop/gens)
 # ================================================================
 
 class NSGAII:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
+    def __init__(self, model, scaler, y_scaler, bounds, pop=DEFAULT_NSGA_POP, gens=DEFAULT_NSGA_GENS,
                  granule_fixed=True, granule_fixed_val=125.0):
         self.model = model
         self.scaler = scaler
@@ -582,13 +580,7 @@ class NSGAII:
         speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
         particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
         binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        # BUGFIX: dwell time is mechanically determined by punch speed
-        # (punch geometry), not an independent decision variable — the
-        # synthetic training data was generated this way, but NSGA-II
-        # previously searched dwell time freely, letting it propose
-        # mechanically-impossible speed/dwell-time combinations outside
-        # the training distribution. Derive it from the (already-clipped)
-        # speed instead of clipping it as a free variable.
+        # dwell time derived from speed
         dwell_time = float(calculate_dwell_time(speed)[0])
         friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
         decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
@@ -613,9 +605,6 @@ class NSGAII:
         speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
         particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
         binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        # BUGFIX: see _repair() above — dwell time is derived from speed,
-        # not searched as a free variable, to keep NSGA-II's proposals
-        # consistent with the training data distribution.
         dwell_time = calculate_dwell_time(speed)
         friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
         decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
@@ -634,18 +623,10 @@ class NSGAII:
         scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             pred_scaled = self.model.predict(X_t)
             pred = self.y_scaler.inverse_transform(pred_scaled)
 
-        # BUGFIX: `density` below is already clipped to [D_MIN, D_MAX], so a
-        # violation check computed from it would always read zero. Compute
-        # the density violation from the *raw* (unclipped) prediction so an
-        # infeasible density is actually penalised, matching how every
-        # other constraint here works. Previously density feasibility was
-        # tracked nowhere in `_evaluate` at all (the D_MIN/D_MAX clip
-        # silently made it non-enforceable), even though the sidebar and
-        # Table 1/2 advertise it as an enforced constraint.
         raw_density = pred[:, 0]
         density = np.clip(raw_density, D_MIN, D_MAX)
         tensile = np.maximum(pred[:, 1], 1e-4)
@@ -694,14 +675,6 @@ class NSGAII:
         return fronts
 
     def _crowding_distance(self, objectives, front):
-        # BUGFIX: `dist` must be indexed by each individual's *fixed*
-        # position within `front`, not by its rank position in the
-        # per-objective sort (`sorted_idx`). Writing to dist[k] using the
-        # sort-order index k silently mixes contributions between
-        # individuals across the two objectives, producing an incorrect
-        # crowding distance that undermines NSGA-II's diversity
-        # preservation. Fixed by mapping each sorted individual back to
-        # its position in `front`.
         if len(front) <= 2:
             return np.ones(len(front)) * np.inf
         front_pos = {ind: pos for pos, ind in enumerate(front)}
@@ -833,24 +806,12 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        # BUGFIX: during synthetic-data generation, dwell time is not an
-        # independent variable — it is deterministically derived from punch
-        # speed via punch geometry (calculate_dwell_time). Several call
-        # sites (the interactive UI slider, NSGA-II's _repair/_repair_batch,
-        # sensitivity analysis) previously treated dwell time as free,
-        # allowing mechanically-inconsistent combinations (e.g. high speed
-        # with a long dwell time) that never appeared in training and whose
-        # predictions are therefore unreliable extrapolations. Recomputing
-        # dwell time from speed here — the single choke point every
-        # prediction passes through — makes every call site consistent
-        # with the training distribution without having to fix each one
-        # individually.
         inputs = list(inputs)
         inputs[11] = float(calculate_dwell_time(inputs[6])[0])
         aug = add_interaction_features(np.array([inputs]))[0]
         scaled = scaler.transform([aug])
         X_t = torch.tensor(scaled, dtype=torch.float32)
-        with torch.no_grad():
+        with torch.inference_mode():
             pred_scaled = model.predict(X_t)[0]
             pred = y_scaler.inverse_transform([pred_scaled])[0]
         density = np.clip(pred[0], D_MIN, D_MAX)
@@ -950,22 +911,6 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     friction0 = formulation['friction']
     decompression_time0 = formulation['decompression_time']
 
-    # BUGFIX: param_defs previously listed parameters in a different order
-    # than base_input's actual column layout (base_input inserts binder
-    # grade and dwell time between particle-size/moisture and
-    # friction/decompression time). Since the sweep below indexed
-    # `low_input[idx]`/`high_input[idx]` by *list position* in param_defs,
-    # every entry from 'Moisture' onward silently perturbed the WRONG
-    # column: e.g. the bar labelled "Moisture" actually varied pressure,
-    # "Pressure" actually varied speed, and "DwellTime" overwrote the
-    # binder_grade slot with a value like 50.0 — nonsensical for a 0-5
-    # categorical encoding. Decompression time was never swept at all
-    # (param_defs had no 13th entry to reach it). Fixed by giving each
-    # entry an explicit `index` matching its true position in base_input,
-    # and dropping binder grade (categorical, and confirmed to have no
-    # modelled effect — see the UI note on the Binder Grade selector) and
-    # dwell time (no longer an independent variable — see predict_pinn)
-    # from the sweep, since perturbing either is no longer meaningful.
     param_defs = [
         {'name': 'API', 'index': 0, 'min': SLIDER_API_MIN, 'max': SLIDER_API_MAX},
         {'name': 'MCC', 'index': 1, 'min': SLIDER_MCC_MIN, 'max': SLIDER_MCC_MAX},
@@ -1045,7 +990,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# PDF REPORT
+# PDF REPORT (unchanged)
 # ================================================================
 
 def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
@@ -1150,7 +1095,7 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING
+# MODEL TRAINING (unchanged)
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
@@ -1160,19 +1105,6 @@ CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final.pt')
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
-            # SECURITY NOTE: weights_only=False is required here because the
-            # checkpoint bundles non-tensor Python objects (sklearn
-            # StandardScalers and the training DataFrame) alongside the
-            # model weights, which torch.load can only unpickle with
-            # weights_only=False — but that means loading this file executes
-            # arbitrary pickle bytecode. CHECKPOINT_PATH lives in the shared
-            # system temp directory, so on a multi-user machine anyone with
-            # write access there before this app starts could substitute a
-            # malicious file. If this app is ever deployed on a shared host,
-            # move CHECKPOINT_PATH to a directory writable only by the app's
-            # own user/service account, or split the checkpoint so the
-            # scaler/df are saved via `joblib.dump` and only the tensor
-            # state_dict goes through `torch.load(..., weights_only=True)`.
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
             model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
             model.load_state_dict(ckpt['model_state'])
@@ -1227,7 +1159,7 @@ def load_or_train():
         scheduler.step(loss.item())
 
         model.eval()
-        with torch.no_grad():
+        with torch.inference_mode():
             val_pred_scaled = model.predict(X_val_t)
             val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
@@ -1266,19 +1198,11 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# MODEL COMPARISON
+# MODEL COMPARISON (unchanged)
 # ================================================================
 
 @st.cache_data(show_spinner="Training baseline models for comparison...")
 def run_model_comparison(_model, _scaler, _y_scaler, _features, _df, _device, cache_key):
-    # PERFORMANCE FIX: this previously ran inline in the main script body,
-    # meaning it retrained an MLPRegressor, a RandomForestRegressor and
-    # (if available) XGBoost — plus 15x bootstrap resampling for each —
-    # on *every* Streamlit rerun, i.e. every time any widget on the page
-    # changed, not just when the model/data actually changed. Wrapped in
-    # @st.cache_data so it only reruns when `cache_key` changes; the
-    # unhashable model/scaler/df objects are underscore-prefixed so
-    # Streamlit skips trying to hash them.
     if _model is None:
         return pd.DataFrame(), []
     X_raw_all = _df[_features].values
@@ -1292,7 +1216,7 @@ def run_model_comparison(_model, _scaler, _y_scaler, _features, _df, _device, ca
     y_test_target = y_b_test[:, 0]
 
     _model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(_device)
         pinn_pred_scaled = _model.predict(pinn_input)
         pinn_pred = _y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
@@ -1350,8 +1274,14 @@ def run_model_comparison(_model, _scaler, _y_scaler, _features, _df, _device, ca
     bench_df = pd.DataFrame(table_rows)
     return bench_df, chart_data
 
-def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
-    if model is None:
+# ================================================================
+# CACHED FEASIBLE REGION GENERATION (NEW)
+# ================================================================
+
+@st.cache_data(show_spinner="Generating feasible region...")
+def cached_feasible_points(_model, _scaler, _y_scaler, n_samples, cache_key):
+    """Cache feasible points based on model checkpoint timestamp."""
+    if _model is None:
         return pd.DataFrame()
     rng = np.random.default_rng(42)
     api = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
@@ -1380,11 +1310,11 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     ])
 
     aug = add_interaction_features(inputs)
-    scaled = scaler.transform(aug)
+    scaled = _scaler.transform(aug)
     X_t = torch.tensor(scaled, dtype=torch.float32)
-    with torch.no_grad():
-        pred_scaled = model.predict(X_t)
-        pred = y_scaler.inverse_transform(pred_scaled)
+    with torch.inference_mode():
+        pred_scaled = _model.predict(X_t)
+        pred = _y_scaler.inverse_transform(pred_scaled)
     density = np.clip(pred[:, 0], D_MIN, D_MAX)
     tensile = np.maximum(pred[:, 1], 1e-4)
     er = np.maximum(pred[:, 2], 1e-4)
@@ -1427,8 +1357,13 @@ with st.sidebar:
     ✅ **Moisture:** {SLIDER_MOISTURE_MIN:.1f}–{SLIDER_MOISTURE_MAX:.1f}%  
     ✅ **Pressure:** {BOUND_PRESSURE_MIN:.0f}–{BOUND_PRESSURE_MAX:.0f} MPa  
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
-    ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
+
+    st.markdown("### ⚙️ Optimisation Settings")
+    nsga_pop = st.slider("NSGA‑II Population", 20, 120, DEFAULT_NSGA_POP, 10)
+    nsga_gens = st.slider("NSGA‑II Generations", 10, 80, DEFAULT_NSGA_GENS, 5)
+    feasible_samples = st.slider("Feasible region sample size", 500, 5000, 1000, 500)
+
     st.caption("🔬 v29.27-R31 — Final Kawakita Fix + Unified Table")
 
 # ---- Experimental Data Upload ----
@@ -1494,14 +1429,6 @@ with col_left:
             pressure = st.slider("Pressure (MPa)", BOUND_PRESSURE_MIN, BOUND_PRESSURE_MAX, st.session_state.get('pressure', 200.0), 1.0, key="pressure_slider")
             speed = st.slider("Speed (rpm)", BOUND_SPEED_MIN, BOUND_SPEED_MAX, st.session_state.get('speed', 20.0), 0.5, key="speed_slider")
         with c2:
-            # BUGFIX: dwell time is mechanically determined by punch speed
-            # (see calculate_dwell_time / predict_pinn) — the synthetic
-            # training data was generated this way, but this slider
-            # previously let the user set dwell time independently of
-            # speed, producing combinations the model was never trained on.
-            # It's now a read-only, speed-derived display; predict_pinn and
-            # NSGA-II's _repair()/_repair_batch() enforce the same
-            # relationship regardless of what's shown here.
             dwell_time = float(calculate_dwell_time(speed)[0])
             st.metric("Dwell Time (derived from Speed)", f"{dwell_time:.1f} ms")
             st.session_state.dwell_time = dwell_time
@@ -1592,9 +1519,9 @@ with col_right:
                 [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
             ])
 
-            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
+            with st.spinner(f"Running NSGA‑II (pop={nsga_pop}, gen={nsga_gens})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds,
-                              pop=NSGA_POP, gens=NSGA_GENS,
+                              pop=nsga_pop, gens=nsga_gens,
                               granule_fixed=granule_fixed,
                               granule_fixed_val=granule if granule_fixed else 125.0)
                 pop, objectives, fronts = nsga.run()
@@ -1648,10 +1575,13 @@ with col_right:
                 st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
                 st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
 
-            with st.spinner("Generating feasible region..."):
-                feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
-                st.session_state.feasible_df = feasible_df
-                st.session_state.tested_point = (api_n, efrf)
+            # Cache‑aware feasible region generation
+            cache_key = os.path.getmtime(CHECKPOINT_PATH) if os.path.exists(CHECKPOINT_PATH) else None
+            feasible_df = cached_feasible_points(model, scaler, y_scaler,
+                                                 n_samples=feasible_samples,
+                                                 cache_key=cache_key)
+            st.session_state.feasible_df = feasible_df
+            st.session_state.tested_point = (api_n, efrf)
 
     # ---- Display results after optimisation ----
     if st.session_state.run_optimized and model is not None:
@@ -1679,79 +1609,69 @@ with col_right:
         # ---- UNIFIED TABLE FOR OPTIMAL SOLUTIONS ----
         st.markdown("### 📊 Optimal Solutions Comparison")
 
-        solutions_rows = []
-
-        # 1. Balanced (always shown)
+        # Batch predict for all available solutions
+        solutions = []
+        solution_types = []
         if balanced_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
-            solutions_rows.append({
-                "Solution Type": "⚖️ Balanced",
-                "API (%)": balanced_solution[0],
-                "MCC (%)": balanced_solution[1],
-                "PVPP (%)": balanced_solution[2],
-                "Mg-St (%)": balanced_solution[3],
-                "Binder (%)": balanced_solution[4],
-                "Moisture (%)": balanced_solution[9],
-                "Pressure (MPa)": balanced_solution[5],
-                "Speed (rpm)": balanced_solution[6],
-                "Granule (µm)": balanced_solution[7],
-                "Particle Size (µm)": balanced_solution[8],
-                "Binder Grade": BINDER_GRADES[int(balanced_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
-            })
-            st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
-
-        # 2. Cost (optional)
+            solutions.append(balanced_solution)
+            solution_types.append("⚖️ Balanced")
         if st.session_state.show_cost_solution and cost_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
-            solutions_rows.append({
-                "Solution Type": "💰 Cost-Optimized",
-                "API (%)": cost_solution[0],
-                "MCC (%)": cost_solution[1],
-                "PVPP (%)": cost_solution[2],
-                "Mg-St (%)": cost_solution[3],
-                "Binder (%)": cost_solution[4],
-                "Moisture (%)": cost_solution[9],
-                "Pressure (MPa)": cost_solution[5],
-                "Speed (rpm)": cost_solution[6],
-                "Granule (µm)": cost_solution[7],
-                "Particle Size (µm)": cost_solution[8],
-                "Binder Grade": BINDER_GRADES[int(cost_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
-            })
-            st.session_state.cost_pred = (d, t, e, ef, dis, tau, beta)
-
-        # 3. Quality (optional)
+            solutions.append(cost_solution)
+            solution_types.append("💰 Cost-Optimized")
         if st.session_state.show_quality_solution and quality_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
-            solutions_rows.append({
-                "Solution Type": "🏆 Quality-Optimized",
-                "API (%)": quality_solution[0],
-                "MCC (%)": quality_solution[1],
-                "PVPP (%)": quality_solution[2],
-                "Mg-St (%)": quality_solution[3],
-                "Binder (%)": quality_solution[4],
-                "Moisture (%)": quality_solution[9],
-                "Pressure (MPa)": quality_solution[5],
-                "Speed (rpm)": quality_solution[6],
-                "Granule (µm)": quality_solution[7],
-                "Particle Size (µm)": quality_solution[8],
-                "Binder Grade": BINDER_GRADES[int(quality_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
-            })
-            st.session_state.quality_pred = (d, t, e, ef, dis, tau, beta)
+            solutions.append(quality_solution)
+            solution_types.append("🏆 Quality-Optimized")
 
-        if solutions_rows:
-            df_solutions = pd.DataFrame(solutions_rows)
+        if solutions:
+            sol_array = np.array(solutions)
+            aug = add_interaction_features(sol_array)
+            scaled = scaler.transform(aug)
+            X_t = torch.tensor(scaled, dtype=torch.float32)
+            with torch.inference_mode():
+                pred_scaled = model.predict(X_t)
+                preds = y_scaler.inverse_transform(pred_scaled)
+
+            # Build rows
+            solution_rows = []
+            for i, sol in enumerate(solutions):
+                d, t, e, ef, dis, tau, beta = preds[i][0], preds[i][1], preds[i][2], \
+                                               preds[i][2] / max(preds[i][1], 1e-4), \
+                                               preds[i][3], preds[i][4], preds[i][5]
+                # clip/discretize
+                d = np.clip(d, D_MIN, D_MAX)
+                t = max(t, 1e-4)
+                ef = max(ef, 1e-4)
+                dis = max(dis, 0.5)
+                tau = max(tau, 1.0)
+                beta = max(beta, 0.5)
+                # store in session state for later use
+                if solution_types[i] == "⚖️ Balanced":
+                    st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
+                elif solution_types[i] == "💰 Cost-Optimized":
+                    st.session_state.cost_pred = (d, t, e, ef, dis, tau, beta)
+                elif solution_types[i] == "🏆 Quality-Optimized":
+                    st.session_state.quality_pred = (d, t, e, ef, dis, tau, beta)
+
+                solution_rows.append({
+                    "Solution Type": solution_types[i],
+                    "API (%)": sol[0],
+                    "MCC (%)": sol[1],
+                    "PVPP (%)": sol[2],
+                    "Mg-St (%)": sol[3],
+                    "Binder (%)": sol[4],
+                    "Moisture (%)": sol[9],
+                    "Pressure (MPa)": sol[5],
+                    "Speed (rpm)": sol[6],
+                    "Granule (µm)": sol[7],
+                    "Particle Size (µm)": sol[8],
+                    "Binder Grade": BINDER_GRADES[int(sol[10])],
+                    "Density": d,
+                    "Tensile (MPa)": t,
+                    "EFRF": ef,
+                    "Disintegration (min)": dis,
+                })
+
+            df_solutions = pd.DataFrame(solution_rows)
             st.dataframe(
                 df_solutions,
                 use_container_width=True,
