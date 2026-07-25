@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R31 (Final Kawakita Fix)
+Hubryd AI – v29.27-R31 (Final Kawakita Fix + Robust Caching)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
 """
@@ -25,6 +25,8 @@ import os
 import tempfile
 import datetime
 import warnings
+import pickle
+import joblib
 warnings.filterwarnings('ignore')
 
 try:
@@ -90,9 +92,9 @@ BOUND_SPEED_MAX = 30.0
 BOUND_GRANULE_MIN = 30.0
 BOUND_GRANULE_MAX = 250.0
 
-# Training parameters
-N_SAMPLES = 15000
-ADAM_EPOCHS = 800
+# Training parameters – adjustable via "Fast Mode"
+DEFAULT_SAMPLES = 15000
+DEFAULT_EPOCHS = 800
 PATIENCE = 80
 NSGA_POP = 80
 NSGA_GENS = 50
@@ -292,7 +294,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
 # DATA GENERATION – FINAL KAWAKITA FIX
 # ================================================================
 
-def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
+def generate_pinn_data(n_samples=DEFAULT_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
 
     # Generate raw values for all formulation components (including moisture)
@@ -326,23 +328,17 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     ])
 
     # ----- Density: Hybrid Heckel + Kawakita (FINAL CORRECTION) -----
-    # Heckel model
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k_heckel * pressure_raw + A_heckel
     D_heckel = 1.0 - np.exp(-x_val)
     D_heckel = np.clip(D_heckel, D_MIN, D_MAX)
 
-    # Kawakita model (CORRECTED: b is very small so 1/b is large, yielding realistic densities)
-    # a ranges 0.85 ~ 0.90
     a_kawakita = 0.85 + 0.0004 * (pressure_raw - 150)
-    # b ranges ~0.00128 ~ 0.0022, so 1/b ranges ~454 ~ 781
     b_kawakita = 0.001 + 0.0002 * binder_n
-    # D = 1 - P / (a*P + 1/b)
     D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0 / b_kawakita)
-    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)  # Now rarely needs clipping
+    D_kawakita = np.clip(D_kawakita, D_MIN, D_MAX)
 
-    # Weighted average (Heckel dominant at high pressure, Kawakita at low)
     pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
     w_heckel = pressure_norm
     w_kawakita = 1.0 - pressure_norm
@@ -351,7 +347,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile (unchanged)
+    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -408,7 +404,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN MODEL (no changes needed)
+# PINN MODEL
 # ================================================================
 
 class Mish(nn.Module):
@@ -474,7 +470,7 @@ class MultiTaskPINN(nn.Module):
             selected = torch.cat([output[:, 0:3], output[:, 7:10]], dim=1)
             return selected.cpu().numpy()
 
-    def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=ADAM_EPOCHS):
+    def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=DEFAULT_EPOCHS):
         pressure = X_raw[:, 5].view(-1, 1)
         mcc = X_raw[:, 1].view(-1, 1)
         api = X_raw[:, 0].view(-1, 1)
@@ -558,7 +554,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -582,13 +578,6 @@ class NSGAII:
         speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
         particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
         binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        # BUGFIX: dwell time is mechanically determined by punch speed
-        # (punch geometry), not an independent decision variable — the
-        # synthetic training data was generated this way, but NSGA-II
-        # previously searched dwell time freely, letting it propose
-        # mechanically-impossible speed/dwell-time combinations outside
-        # the training distribution. Derive it from the (already-clipped)
-        # speed instead of clipping it as a free variable.
         dwell_time = float(calculate_dwell_time(speed)[0])
         friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
         decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
@@ -613,9 +602,6 @@ class NSGAII:
         speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
         particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
         binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        # BUGFIX: see _repair() above — dwell time is derived from speed,
-        # not searched as a free variable, to keep NSGA-II's proposals
-        # consistent with the training data distribution.
         dwell_time = calculate_dwell_time(speed)
         friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
         decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
@@ -638,14 +624,6 @@ class NSGAII:
             pred_scaled = self.model.predict(X_t)
             pred = self.y_scaler.inverse_transform(pred_scaled)
 
-        # BUGFIX: `density` below is already clipped to [D_MIN, D_MAX], so a
-        # violation check computed from it would always read zero. Compute
-        # the density violation from the *raw* (unclipped) prediction so an
-        # infeasible density is actually penalised, matching how every
-        # other constraint here works. Previously density feasibility was
-        # tracked nowhere in `_evaluate` at all (the D_MIN/D_MAX clip
-        # silently made it non-enforceable), even though the sidebar and
-        # Table 1/2 advertise it as an enforced constraint.
         raw_density = pred[:, 0]
         density = np.clip(raw_density, D_MIN, D_MAX)
         tensile = np.maximum(pred[:, 1], 1e-4)
@@ -694,14 +672,6 @@ class NSGAII:
         return fronts
 
     def _crowding_distance(self, objectives, front):
-        # BUGFIX: `dist` must be indexed by each individual's *fixed*
-        # position within `front`, not by its rank position in the
-        # per-objective sort (`sorted_idx`). Writing to dist[k] using the
-        # sort-order index k silently mixes contributions between
-        # individuals across the two objectives, producing an incorrect
-        # crowding distance that undermines NSGA-II's diversity
-        # preservation. Fixed by mapping each sorted individual back to
-        # its position in `front`.
         if len(front) <= 2:
             return np.ones(len(front)) * np.inf
         front_pos = {ind: pos for pos, ind in enumerate(front)}
@@ -833,18 +803,6 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
         return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
-        # BUGFIX: during synthetic-data generation, dwell time is not an
-        # independent variable — it is deterministically derived from punch
-        # speed via punch geometry (calculate_dwell_time). Several call
-        # sites (the interactive UI slider, NSGA-II's _repair/_repair_batch,
-        # sensitivity analysis) previously treated dwell time as free,
-        # allowing mechanically-inconsistent combinations (e.g. high speed
-        # with a long dwell time) that never appeared in training and whose
-        # predictions are therefore unreliable extrapolations. Recomputing
-        # dwell time from speed here — the single choke point every
-        # prediction passes through — makes every call site consistent
-        # with the training distribution without having to fix each one
-        # individually.
         inputs = list(inputs)
         inputs[11] = float(calculate_dwell_time(inputs[6])[0])
         aug = add_interaction_features(np.array([inputs]))[0]
@@ -950,22 +908,6 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     friction0 = formulation['friction']
     decompression_time0 = formulation['decompression_time']
 
-    # BUGFIX: param_defs previously listed parameters in a different order
-    # than base_input's actual column layout (base_input inserts binder
-    # grade and dwell time between particle-size/moisture and
-    # friction/decompression time). Since the sweep below indexed
-    # `low_input[idx]`/`high_input[idx]` by *list position* in param_defs,
-    # every entry from 'Moisture' onward silently perturbed the WRONG
-    # column: e.g. the bar labelled "Moisture" actually varied pressure,
-    # "Pressure" actually varied speed, and "DwellTime" overwrote the
-    # binder_grade slot with a value like 50.0 — nonsensical for a 0-5
-    # categorical encoding. Decompression time was never swept at all
-    # (param_defs had no 13th entry to reach it). Fixed by giving each
-    # entry an explicit `index` matching its true position in base_input,
-    # and dropping binder grade (categorical, and confirmed to have no
-    # modelled effect — see the UI note on the Binder Grade selector) and
-    # dwell time (no longer an independent variable — see predict_pinn)
-    # from the sweep, since perturbing either is no longer meaningful.
     param_defs = [
         {'name': 'API', 'index': 0, 'min': SLIDER_API_MIN, 'max': SLIDER_API_MAX},
         {'name': 'MCC', 'index': 1, 'min': SLIDER_MCC_MIN, 'max': SLIDER_MCC_MAX},
@@ -1150,44 +1092,60 @@ def generate_enhanced_pdf_report(formulation, bench_df, balanced_solution, quali
         return None, str(e)
 
 # ================================================================
-# MODEL TRAINING
+# MODEL TRAINING – with robust caching
 # ================================================================
 
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r31_final.pt')
+CHECKPOINT_MODEL = os.path.join(CACHE_DIR, 'hubryd_model_weights.pt')
+CHECKPOINT_SCALERS = os.path.join(CACHE_DIR, 'hubryd_scalers.joblib')
+CHECKPOINT_META = os.path.join(CACHE_DIR, 'hubryd_meta.joblib')
 
-@st.cache_resource
-def load_or_train():
-    if os.path.exists(CHECKPOINT_PATH):
+@st.cache_resource(show_spinner=False)
+def load_or_train(fast_mode=False):
+    global DEFAULT_SAMPLES, DEFAULT_EPOCHS
+    if fast_mode:
+        n_samples = 5000
+        epochs = 300
+    else:
+        n_samples = DEFAULT_SAMPLES
+        epochs = DEFAULT_EPOCHS
+
+    # Check if all cache files exist and are loadable
+    cache_ok = (os.path.exists(CHECKPOINT_MODEL) and
+                os.path.exists(CHECKPOINT_SCALERS) and
+                os.path.exists(CHECKPOINT_META))
+
+    if cache_ok:
         try:
-            # SECURITY NOTE: weights_only=False is required here because the
-            # checkpoint bundles non-tensor Python objects (sklearn
-            # StandardScalers and the training DataFrame) alongside the
-            # model weights, which torch.load can only unpickle with
-            # weights_only=False — but that means loading this file executes
-            # arbitrary pickle bytecode. CHECKPOINT_PATH lives in the shared
-            # system temp directory, so on a multi-user machine anyone with
-            # write access there before this app starts could substitute a
-            # malicious file. If this app is ever deployed on a shared host,
-            # move CHECKPOINT_PATH to a directory writable only by the app's
-            # own user/service account, or split the checkpoint so the
-            # scaler/df are saved via `joblib.dump` and only the tensor
-            # state_dict goes through `torch.load(..., weights_only=True)`.
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
-            model.load_state_dict(ckpt['model_state'])
-            scaler = ckpt['scaler']
-            y_scaler = ckpt['y_scaler']
-            features = ckpt['features']
-            df = ckpt['df']
-            return model, scaler, y_scaler, features, df
-        except Exception as e:
+            # Load model weights with weights_only=True (safe)
+            state_dict = torch.load(CHECKPOINT_MODEL, map_location='cpu', weights_only=True)
+            # Load metadata
+            meta = joblib.load(CHECKPOINT_META)
+            input_dim = meta['input_dim']
+            features = meta['features']
+            # Recreate model with correct input_dim
+            model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE)
+            model.load_state_dict(state_dict)
+            # Load scalers
+            scaler, y_scaler = joblib.load(CHECKPOINT_SCALERS)
+            # We don't need the full df for prediction, but keep for comparison
+            return model, scaler, y_scaler, features, None
+        except (pickle.UnpicklingError, EOFError, KeyError, AttributeError, OSError) as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
-            if os.path.exists(CHECKPOINT_PATH):
-                os.remove(CHECKPOINT_PATH)
+            # Delete corrupted files
+            for f in [CHECKPOINT_MODEL, CHECKPOINT_SCALERS, CHECKPOINT_META]:
+                if os.path.exists(f):
+                    os.remove(f)
+            # Fall through to retrain
+        except Exception as e:
+            st.warning(f"Unexpected cache error: {e}. Retraining...")
+            for f in [CHECKPOINT_MODEL, CHECKPOINT_SCALERS, CHECKPOINT_META]:
+                if os.path.exists(f):
+                    os.remove(f)
 
-    st.caption("🔄 Training FINAL corrected Kawakita model (15k samples)...")
-    df, features = generate_pinn_data(N_SAMPLES)
+    # Retrain
+    st.caption(f"🔄 Training FINAL corrected Kawakita model ({n_samples} samples, {epochs} epochs)...")
+    df, features = generate_pinn_data(n_samples)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
             'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
@@ -1217,10 +1175,10 @@ def load_or_train():
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    for epoch in range(ADAM_EPOCHS):
+    for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
-        loss = model.compute_loss(X_train_t, X_raw_train_t, y_train_t, y_scaler, epoch, ADAM_EPOCHS)
+        loss = model.compute_loss(X_train_t, X_raw_train_t, y_train_t, y_scaler, epoch, epochs)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -1234,7 +1192,7 @@ def load_or_train():
             val_r2 = r2_score(val_true, val_pred)
 
         if epoch % 50 == 0:
-            status_text.text(f"Epoch {epoch+1}/{ADAM_EPOCHS} - Val R²: {val_r2:.4f}")
+            status_text.text(f"Epoch {epoch+1}/{epochs} - Val R²: {val_r2:.4f}")
 
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
@@ -1246,22 +1204,18 @@ def load_or_train():
                 st.info(f"Early stopping at epoch {epoch+1} (no improvement for {PATIENCE} epochs)")
                 break
 
-        progress_bar.progress((epoch+1)/ADAM_EPOCHS)
+        progress_bar.progress((epoch+1)/epochs)
 
     if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
         model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
-    checkpoint = {
-        'model_state': model.state_dict(),
-        'scaler': scaler,
-        'y_scaler': y_scaler,
-        'features': features,
-        'df': df,
-        'input_dim': input_dim
-    }
-    torch.save(checkpoint, CHECKPOINT_PATH)
+    # Save checkpoint with split files
+    torch.save(model.state_dict(), CHECKPOINT_MODEL, _use_new_zipfile_serialization=True)
+    joblib.dump((scaler, y_scaler), CHECKPOINT_SCALERS)
+    joblib.dump({'features': features, 'input_dim': input_dim}, CHECKPOINT_META)
+
     st.success("✅ Model trained and cached successfully!")
     return model, scaler, y_scaler, features, df
 
@@ -1271,15 +1225,7 @@ def load_or_train():
 
 @st.cache_data(show_spinner="Training baseline models for comparison...")
 def run_model_comparison(_model, _scaler, _y_scaler, _features, _df, _device, cache_key):
-    # PERFORMANCE FIX: this previously ran inline in the main script body,
-    # meaning it retrained an MLPRegressor, a RandomForestRegressor and
-    # (if available) XGBoost — plus 15x bootstrap resampling for each —
-    # on *every* Streamlit rerun, i.e. every time any widget on the page
-    # changed, not just when the model/data actually changed. Wrapped in
-    # @st.cache_data so it only reruns when `cache_key` changes; the
-    # unhashable model/scaler/df objects are underscore-prefixed so
-    # Streamlit skips trying to hash them.
-    if _model is None:
+    if _model is None or _df is None:
         return pd.DataFrame(), []
     X_raw_all = _df[_features].values
     y_raw_all = _df[['Tensile_Strength_MPa']].values
@@ -1431,6 +1377,9 @@ with st.sidebar:
     """)
     st.caption("🔬 v29.27-R31 — Final Kawakita Fix + Unified Table")
 
+# ---- Fast Mode Toggle ----
+fast_mode = st.sidebar.toggle("⚡ Fast Mode (Reduced Training)", value=False, help="Use fewer samples and epochs for quicker runs.")
+
 # ---- Experimental Data Upload ----
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📁 Experimental Data")
@@ -1447,10 +1396,14 @@ if uploaded_file is not None:
 
 # Load model
 try:
-    model, scaler, y_scaler, features, df = load_or_train()
+    model, scaler, y_scaler, features, df = load_or_train(fast_mode=fast_mode)
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
+    scaler = None
+    y_scaler = None
+    features = None
+    df = None
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if model is not None:
@@ -1494,14 +1447,6 @@ with col_left:
             pressure = st.slider("Pressure (MPa)", BOUND_PRESSURE_MIN, BOUND_PRESSURE_MAX, st.session_state.get('pressure', 200.0), 1.0, key="pressure_slider")
             speed = st.slider("Speed (rpm)", BOUND_SPEED_MIN, BOUND_SPEED_MAX, st.session_state.get('speed', 20.0), 0.5, key="speed_slider")
         with c2:
-            # BUGFIX: dwell time is mechanically determined by punch speed
-            # (see calculate_dwell_time / predict_pinn) — the synthetic
-            # training data was generated this way, but this slider
-            # previously let the user set dwell time independently of
-            # speed, producing combinations the model was never trained on.
-            # It's now a read-only, speed-derived display; predict_pinn and
-            # NSGA-II's _repair()/_repair_batch() enforce the same
-            # relationship regardless of what's shown here.
             dwell_time = float(calculate_dwell_time(speed)[0])
             st.metric("Dwell Time (derived from Speed)", f"{dwell_time:.1f} ms")
             st.session_state.dwell_time = dwell_time
@@ -1788,17 +1733,21 @@ with col_right:
         st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", True), key="show_comparison")
         if st.session_state.show_comparison:
             st.markdown("### 📊 Model Comparison")
+            # Use a cache key based on the model checkpoint file size or modification time
+            cache_key = f"{CHECKPOINT_MODEL}_{os.path.getmtime(CHECKPOINT_MODEL) if os.path.exists(CHECKPOINT_MODEL) else 0}"
             bench_df, chart_data = run_model_comparison(
                 model, scaler, y_scaler, features, df, device,
-                cache_key=f"{CHECKPOINT_PATH}:{N_SAMPLES}:{len(df)}"
+                cache_key=cache_key
             )
             st.session_state.benchmark_df = bench_df
-            fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
-                             title='R² Comparison (Tensile Strength)',
-                             text=pd.DataFrame(chart_data)['R² Score'].round(3))
-            fig_bar.update_layout(height=380, template='plotly_white')
-            st.plotly_chart(fig_bar, use_container_width=True)
-            st.dataframe(bench_df, use_container_width=True)
+            if chart_data:
+                fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
+                                 title='R² Comparison (Tensile Strength)',
+                                 text=pd.DataFrame(chart_data)['R² Score'].round(3))
+                fig_bar.update_layout(height=380, template='plotly_white')
+                st.plotly_chart(fig_bar, use_container_width=True)
+            if bench_df is not None and not bench_df.empty:
+                st.dataframe(bench_df, use_container_width=True)
 
         st.toggle("🔬 Sensitivity Analysis", value=st.session_state.get("show_sensitivity", False), key="show_sensitivity")
         if st.session_state.show_sensitivity:
