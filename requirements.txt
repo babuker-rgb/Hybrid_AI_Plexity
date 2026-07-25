@@ -1,10 +1,7 @@
-pip
-install
 streamlit
 numpy
 pandas
 torch
-scikit-learn
 plotly
-joblib
-fpdf2 xgboost
+fpdf2
+xgboost
