@@ -562,7 +562,8 @@ def load_or_train() -> Tuple[MultiTaskPINN, StandardScaler, StandardScaler, List
     model = MultiTaskPINN(n_features, hidden=CFG.HIDDEN_SIZE).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=CFG.LEARNING_RATE, weight_decay=CFG.WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5, verbose=False)
+    # FIX: removed 'verbose' argument (not supported in older PyTorch)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
 
     X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
@@ -1511,8 +1512,6 @@ def generate_enhanced_pdf_report(
         # Embed plots if available (as images)
         if pareto_fig is not None:
             img_bytes = pareto_fig.to_image(format="png", width=800, height=500)
-            img_b64 = base64.b64encode(img_bytes).decode()
-            # Save temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                 tmp.write(img_bytes)
                 tmp.flush()
