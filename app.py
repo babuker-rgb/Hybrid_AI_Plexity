@@ -1,4 +1,4 @@
-"""
+""
 Hubryd AI – v29.27-R31 (Final Kawakita Fix + Robust Caching)
 Hybrid AI For Multi-Objective Tablet Optimization
 Nile Valley University, Sudan
