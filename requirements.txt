@@ -6,3 +6,13 @@ scikit-learn
 plotly
 fpdf2
 xgboost
+pip
+install
+streamlit
+numpy
+pandas
+torch
+scikit-learn
+plotly
+joblib
+fpdf2 xgboost
