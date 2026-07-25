@@ -1,11 +1,3 @@
-streamlit
-torch
-numpy
-pandas
-scikit-learn
-plotly
-fpdf2
-xgboost
 pip
 install
 streamlit
