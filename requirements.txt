@@ -1,8 +1,8 @@
-streamlit>=1.28.0
-numpy>=1.24.0
-pandas>=2.0.0
-torch>=2.0.0
-plotly>=5.14.0
-scikit-learn>=1.2.0
-xgboost>=1.7.0      # optional – code falls back gracefully if missing
-fpdf2>=2.7.0        # optional – PDF reports require it; if not installed, report generation will warn
+streamlit
+numpy
+pandas
+torch
+plotly
+scikit-learn
+xgboost      # optional – code falls back gracefully if missing
+fpdf2       # optional – PDF reports require it; if not installed, report generation will warn
