@@ -9,7 +9,7 @@ Version: 32.1 (v32.0 UI + v32.4 technical upgrades)
            - OOD shrinkage
            - MC-Dropout uncertainty
            - EFRF constraint loss (enhanced physics)
-           - Real data upload
+           - Real data upload (file-based caching)
 """
 
 import streamlit as st
@@ -30,6 +30,8 @@ import plotly.graph_objects as go
 import time
 import os
 import tempfile
+import hashlib
+import pickle
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -864,42 +866,29 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 9. TRAIN MODEL (with real data support & OOD mean storage)
+# 9. TRAIN MODEL (with file-based caching, no @st.cache_resource)
 # ================================================================
 
-@st.cache_resource
-def load_pinn_model():
-    # Check if real data is available
-    real_df = st.session_state.get('user_data')
-    if real_df is not None and len(real_df) > 0:
-        st.info(f"Using real data ({len(real_df)} samples)")
-        # Expect columns: API_%, MCC_%, PVPP_%, MgSt_%, Binder_%, Pressure_MPa, Speed_rpm, Granule_Size_µm, Density, Tensile_Strength_MPa, Elastic_Recovery_%
-        required_cols = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
-                         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
-                         'Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']
-        if all(col in real_df.columns for col in required_cols):
-            X_raw = real_df[required_cols[:8]].values
-            y = real_df[required_cols[8:]].values
-            feature_names = required_cols[:8]
-        else:
-            st.error("Uploaded data missing required columns. Falling back to synthetic.")
-            df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
-            X_raw = df[feature_names].values
-            y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
-    else:
-        df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
-        X_raw = df[feature_names].values
-        y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+def _data_fingerprint(df):
+    """Compute a unique fingerprint for a DataFrame."""
+    if df is None:
+        return "synthetic"
+    try:
+        # Hash the first few rows and shape
+        hash_str = hashlib.sha256(pd.util.hash_pandas_object(df, index=False).values).hexdigest()
+        return f"real_{hash_str[:12]}"
+    except:
+        return "synthetic"
 
+def _train_pinn_model(X_raw, y, input_dim):
+    """Internal function to train the PINN model on given data."""
     X_augmented = add_interaction_features(X_raw)
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_augmented)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
 
-    # Store y_train_mean (original scale) for OOD shrinkage
-    y_train_mean = y.mean(axis=0)  # [mean_density, mean_tensile, mean_er]
+    y_train_mean = y.mean(axis=0)
 
     X_scaled_train, X_scaled_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
         X_scaled, X_raw, y_scaled, test_size=0.3, random_state=42
@@ -917,8 +906,8 @@ def load_pinn_model():
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
-    model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
-    model.y_train_mean = y_train_mean  # store for later use
+    model = MultiTaskTruePINN(input_dim=input_dim)
+    model.y_train_mean = y_train_mean
 
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
@@ -926,10 +915,7 @@ def load_pinn_model():
     patience = PATIENCE
     counter = 0
     best_state = None
-    progress_bar = st.progress(0)
     max_epochs = 3000
-
-    st.info("🧠 Training PINN with enhanced physics (EFRF constraint)...")
 
     for epoch in range(max_epochs):
         model.train()
@@ -975,24 +961,86 @@ def load_pinn_model():
             counter += 1
 
         if counter > patience:
-            st.info(f"Early stopping at epoch {epoch}")
             break
-
-        if (epoch + 1) % 200 == 0:
-            progress_bar.progress(min(1.0, (epoch + 1) / max_epochs))
-
-    progress_bar.progress(1.0)
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     model.eval()
-    model.feature_names = feature_names
     model.scaler = scaler
     model.y_scaler = y_scaler
     model.y_train_mean = y_train_mean
-    torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
-    return model, scaler, y_scaler, feature_names, y_train_mean, model.loss_history
+    return model, scaler, y_scaler, y_train_mean, model.loss_history
+
+def get_trained_model(real_df=None):
+    """Load or train model based on data (real or synthetic). Uses file-based caching keyed by fingerprint."""
+    fingerprint = _data_fingerprint(real_df)
+    checkpoint_dir = tempfile.gettempdir()
+    checkpoint_path = os.path.join(checkpoint_dir, f"pinn_model_{fingerprint}.pt")
+
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            model = MultiTaskTruePINN(input_dim=checkpoint['input_dim'])
+            model.load_state_dict(checkpoint['model_state'])
+            model.y_train_mean = checkpoint['y_train_mean']
+            model.loss_history = checkpoint.get('loss_history', {'train': [], 'val': [], 'data': [], 'physics': []})
+            model.eval()
+            scaler = checkpoint['scaler']
+            y_scaler = checkpoint['y_scaler']
+            y_train_mean = checkpoint['y_train_mean']
+            loss_history = model.loss_history
+            # Reconstruct feature_names (not stored, but we can get from training data or use default)
+            # We'll just return a placeholder; but we need feature_names for compatibility.
+            # We'll use a default list; if real data was used, the names are the same.
+            feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
+                             'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
+            return model, scaler, y_scaler, feature_names, y_train_mean, loss_history
+        except Exception as e:
+            st.warning(f"Failed to load checkpoint: {e}. Retraining...")
+            # remove corrupted checkpoint
+            try:
+                os.remove(checkpoint_path)
+            except:
+                pass
+
+    # Train new model
+    if real_df is not None and len(real_df) > 0:
+        # Validate columns
+        required_cols = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
+                         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
+                         'Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']
+        if all(col in real_df.columns for col in required_cols):
+            X_raw = real_df[required_cols[:8]].values
+            y = real_df[required_cols[8:]].values
+            feature_names = required_cols[:8]
+            st.info(f"Training on real data ({len(real_df)} samples)")
+        else:
+            st.error("Uploaded data missing required columns. Falling back to synthetic.")
+            df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+            X_raw = df[feature_names].values
+            y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+    else:
+        df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+        X_raw = df[feature_names].values
+        y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+
+    input_dim = add_interaction_features(X_raw).shape[1]
+    model, scaler, y_scaler, y_train_mean, loss_history = _train_pinn_model(X_raw, y, input_dim)
+
+    # Save checkpoint
+    checkpoint = {
+        'model_state': model.state_dict(),
+        'scaler': scaler,
+        'y_scaler': y_scaler,
+        'y_train_mean': y_train_mean,
+        'loss_history': loss_history,
+        'input_dim': input_dim,
+        'feature_names': feature_names
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+    return model, scaler, y_scaler, feature_names, y_train_mean, loss_history
 
 # ================================================================
 # 10. PREDICTION & PLOTS (with OOD shrinkage & uncertainty)
@@ -1012,32 +1060,16 @@ def predict_pinn(model, scaler, y_scaler, y_train_mean, inputs, return_std=False
                 pred_scaled = model.predict(X_tensor)[0]
             pred_std = None
 
-        # Inverse transform to original scale
-        # Need to scale back: we have scaled y from y_scaler. But y_scaler is a StandardScaler.
-        # We'll apply inverse transform on the raw predictions (which are in scaled y space)
-        # However, the model outputs are in scaled y space? Actually the model was trained on y_scaled.
-        # The forward pass returns outputs in the same scaled space? No, the model outputs are in original scale because we didn't apply y_scaler inside the model.
-        # We trained on y_scaled but the model outputs raw values (because we didn't scale inside). Wait, careful: In training, we used y_scaled as target, and model outputs are in the same scale as y_scaled? Actually the model outputs are not scaled; we use y_scaled to compute loss, but the model outputs are in the same units as y_scaled because we directly compare. However, the model's forward does not apply inverse scaling; it outputs raw logits that are transformed via sigmoid/softplus to produce values in (0,1) and softplus for positive values. Those are not scaled; they are in the same range as the target (since we scaled y to zero mean and unit variance). So the model outputs are in scaled units. So we need to inverse transform.
-        # So we need to inverse transform using y_scaler.
-        # We'll convert pred_mean to original scale.
         if return_std:
-            # We have mean and std in scaled space; we need to convert to original scale.
-            # For std, we need to multiply by the scale factor of y_scaler (std of original y).
-            # Simpler: we can inverse transform the mean, and for std, we can multiply by the scale (std).
-            # But we also have to account that we might have multiple outputs.
-            # We'll do:
             mean_orig = y_scaler.inverse_transform([pred_mean])[0]
-            std_orig = pred_std * y_scaler.scale_  # scale_ is the std of each feature
+            std_orig = pred_std * y_scaler.scale_
             density, tensile, er = mean_orig[0], mean_orig[1], mean_orig[2]
             std_d, std_t, std_e = std_orig[0], std_orig[1], std_orig[2]
         else:
-            # pred_scaled is in scaled space
             pred_original = y_scaler.inverse_transform([pred_scaled])[0]
             density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
             std_d = std_t = std_e = None
 
-        # Apply OOD shrinkage on density, tensile, er using y_train_mean (original scale)
-        # We'll reshape to (1,3)
         pred_raw = np.array([[density, tensile, er]])
         density_shrunk, tensile_shrunk, er_shrunk = apply_ood_shrinkage(
             pred_raw, inputs_scaled, y_train_mean
@@ -1052,19 +1084,6 @@ def predict_pinn(model, scaler, y_scaler, y_train_mean, inputs, return_std=False
             efrf = max(0.0001, min(efrf, 5.0))
 
         if return_std:
-            # We don't have std after shrinkage; approximate by scaling the original std by the shrink factor?
-            # For simplicity, we'll just return the original std (before shrinkage).
-            # Or we can compute uncertainty on the final values by Monte Carlo over dropout,
-            # but we already have std from MC-Dropout. However, we applied shrinkage deterministically.
-            # A pragmatic approach: keep the std from MC-Dropout as a measure.
-            # We'll return the std of the original predictions (before shrinkage) but scaled.
-            # For now, just return None for std after shrinkage, or we can return the std from MC-Dropout.
-            # We'll return std_d, std_t, std_e for the original unscaled (but after OOD we changed mean).
-            # Better: we can propagate uncertainty through the shrinkage? Not trivial.
-            # We'll just return the std from MC-Dropout as a rough measure.
-            # We'll return std_d, std_t, std_e (these are in original scale for the raw predictions, not shrunk).
-            # We'll multiply by the shrink factor? Not accurate.
-            # Simplification: return the std from MC-Dropout as is.
             return density, tensile, er, efrf, std_d, std_t, std_e
         else:
             return density, tensile, er, efrf
@@ -1249,7 +1268,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 11. STREAMLIT UI (mostly unchanged, with file uploader in sidebar)
+# 11. STREAMLIT UI (mostly unchanged)
 # ================================================================
 
 st.set_page_config(page_title="PINN Framework v32.1", page_icon="🧬", layout="wide")
@@ -1297,22 +1316,19 @@ with st.sidebar:
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            # Expected columns (matching the synthetic data format)
             required = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
                         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
                         'Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']
             if all(col in df.columns for col in required):
                 st.session_state.user_data = df
                 st.success(f"✅ Loaded {len(df)} samples")
-                # Force retrain (clear cache)
-                st.cache_resource.clear()
-                st.info("Model will retrain on the next prediction.")
+                # Force retrain by clearing the checkpoint? Not needed, fingerprint will change.
             else:
                 st.error("CSV missing required columns. See help.")
         except Exception as e:
             st.error(f"Error reading file: {e}")
     else:
-        if 'user_data' in st.session_state:
+        if 'user_data' in st.session_state and st.session_state.user_data is not None:
             st.info(f"Using real data ({len(st.session_state.user_data)} samples)")
         else:
             st.info("Using synthetic data (fallback)")
@@ -1321,7 +1337,9 @@ with st.sidebar:
     st.info("🔬 **v32.1** — Enhanced physics, OOD shrinkage, uncertainty, mass balance")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
-    model, scaler, y_scaler, feature_names, y_train_mean, loss_history = load_pinn_model()
+    # Get real data if any
+    real_df = st.session_state.get('user_data')
+    model, scaler, y_scaler, feature_names, y_train_mean, loss_history = get_trained_model(real_df)
 st.success("✅ Multi-Task True PINN trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
@@ -1471,17 +1489,14 @@ with col_right:
                 st.caption("Hold-out test set (20% of data) — R², RMSE, MAE")
 
                 # Use the same data as training? We'll generate a test set from the original data.
-                # Since we may have real data, we can split from that.
                 if 'user_data' in st.session_state and st.session_state.user_data is not None:
                     df_real = st.session_state.user_data
                     X_test_raw = df_real[feature_names].values
                     y_test = df_real[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
-                    # Use a portion as test
                     X_train_raw, X_test_raw, y_train, y_test = train_test_split(
                         X_test_raw, y_test, test_size=0.2, random_state=42
                     )
                 else:
-                    # Generate fresh synthetic test set
                     df_test, _ = generate_pinn_data(n_samples=500, random_state=99)
                     X_test_raw = df_test[feature_names].values
                     y_test = df_test[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
@@ -1489,9 +1504,8 @@ with col_right:
                 X_test_aug = add_interaction_features(X_test_raw)
                 X_test_scaled = scaler.transform(X_test_aug)
 
-                # PINN prediction
                 pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # tensile
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
                 y_test_tensile = y_test[:, 1]
                 pinn_r2 = r2_score(y_test_tensile, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test_tensile, pinn_pred))
@@ -1503,10 +1517,6 @@ with col_right:
                 col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
                 st.divider()
 
-                # Other models
-                comp_df = train_and_compare(X_test_scaled, X_test_scaled, y_test_tensile, y_test_tensile)  # dummy, we'll use same
-                # Actually we need a proper split; but we already have test set.
-                # We'll use the same test set for all models.
                 X_train_ml, X_test_ml, y_train_ml, y_test_ml = train_test_split(
                     X_test_scaled, y_test_tensile, test_size=0.3, random_state=42
                 )
