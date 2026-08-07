@@ -1,494 +1,1604 @@
-# ================================================================
-# Hybrid AI v32.0-Ultimate · Unified Release
-# (NSGA-III Adaptive + PINN + Physics + 2D/3D/Radar)
-# ================================================================
+"""
+True Physics-Informed Neural Network (PINN) - Complete Professional Framework
+Multi-Objective Tablet Manufacturing Optimization with Full Analytics
+
+Author: Babuker A. Abdalla
+Affiliation: Nile Valley University, Postgraduate College, Sudan
+Version: 32.1 (v32.0 UI + v32.4 technical upgrades)
+           - Iterative mass balance
+           - OOD shrinkage
+           - MC-Dropout uncertainty
+           - EFRF constraint loss (enhanced physics)
+           - Real data upload
+"""
 
 import streamlit as st
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.neural_network import MLPRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from fpdf import FPDF
+import datetime
+import warnings
 import plotly.graph_objects as go
 import time
-import warnings
-import json
 import os
 import tempfile
-from datetime import datetime
-from sklearn.inspection import permutation_importance
-from sklearn.ensemble import RandomForestRegressor
-
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# PAGE CONFIG
+# 0. USER-CONFIGURABLE PARAMETERS (UPDATED)
 # ================================================================
-st.set_page_config(
-    page_title="Hybrid AI v32.0-Ultimate", page_icon="🧬", layout="wide"
-)
 
-# ================================================================
-# CONSTANTS
-# ================================================================
-API_MIN, API_MAX = 80.0, 98.0
-BINDER_MIN, BINDER_MAX = 1.4, 6.0
-PVPP_MIN, PVPP_MAX = 1.0, 6.0
-MGST_MIN, MGST_MAX = 0.10, 1.2
-MCC_MIN, MCC_MAX = 1.5, 8.0
-MOISTURE_MIN, MOISTURE_MAX = 0.5, 5.0
-PRESSURE_MIN, PRESSURE_MAX = 150.0, 250.0
-SPEED_MIN, SPEED_MAX = 15.0, 30.0
-EFRF_THRESHOLD = 0.40
+TENSILE_MIN = 1.90          # MPa
+EFRF_MAX = 0.40             # dimensionless
+MCC_MAX = 8.0               # %
+DENSITY_MAX = 0.99
+PRESSURE_MAX = 300.0        # MPa
 
-POPULATION_SIZE = 80
+NSGA_POP_SIZE = 80          # Reduced for speed
 NSGA_GENERATIONS = 80
-TRAINING_EPOCHS = 1200
-EARLY_STOPPING_PATIENCE = 100
-HIDDEN_SIZE = 512
-N_SAMPLES = 10000
 
-BINDER_GRADES = {
-    "MCC PH101": {"compressibility": 0.85, "disintegration": 0.90, "flow": 0.80},
-    "MCC PH102": {"compressibility": 0.90, "disintegration": 0.85, "flow": 0.85},
-    "MCC PH200": {"compressibility": 0.95, "disintegration": 0.80, "flow": 0.90},
-    "MCC KG": {"compressibility": 0.88, "disintegration": 0.88, "flow": 0.82},
-    "Lactose Monohydrate": {"compressibility": 0.75, "disintegration": 0.95, "flow": 0.78},
-    "Dicalcium Phosphate": {"compressibility": 0.70, "disintegration": 0.85, "flow": 0.75}
+BINDER_MIN = 0.5
+BINDER_MAX = 5.0
+
+# --- Enhanced physics weights (v32.4 style) ---
+PHYSICS_WEIGHT = 0.1        # Increased from 0.0001
+EFRF_CONSTRAINT_WEIGHT = 0.1  # New: explicit EFRF penalty
+DATA_WEIGHT = 1.0
+N_SAMPLES = 2000            # More data for better learning
+PATIENCE = 100
+
+# ================================================================
+# 1. SAFE IMPORTS
+# ================================================================
+
+try:
+    from xgboost import XGBRegressor
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
+
+# ================================================================
+# 2. SESSION STATE
+# ================================================================
+
+DEFAULTS = {
+    'api': 90.5,
+    'binder': 2.7,
+    'pvpp': 3.0,
+    'mgst': 0.20,
+    'mcc': 5.0,
+    'pressure': 230.0,
+    'speed': 12.0,
+    'granule': 125.0
 }
-BINDER_GRADE_NAMES = list(BINDER_GRADES.keys())
+
+RANGES = {
+    'api': (85.0, 95.0),
+    'binder': (BINDER_MIN, BINDER_MAX),
+    'pvpp': (0.5, 6.0),
+    'mgst': (0.01, 1.2),
+    'mcc': (0.0, MCC_MAX),
+    'pressure': (80.0, PRESSURE_MAX),
+    'speed': (1.0, 50.0),
+    'granule': (30.0, 250.0)
+}
+
+def safe_initialize():
+    for key in DEFAULTS:
+        if key not in st.session_state:
+            st.session_state[key] = DEFAULTS[key]
+        else:
+            try:
+                float(st.session_state[key])
+            except (ValueError, TypeError):
+                st.session_state[key] = DEFAULTS[key]
+
+def clamp_session_state():
+    for key in DEFAULTS:
+        if key in st.session_state:
+            try:
+                val = float(st.session_state[key])
+                min_val, max_val = RANGES[key]
+                if val < min_val: st.session_state[key] = min_val
+                elif val > max_val: st.session_state[key] = max_val
+            except:
+                st.session_state[key] = DEFAULTS[key]
+
+def get_safe_value(key):
+    if key not in st.session_state:
+        st.session_state[key] = DEFAULTS[key]
+    try:
+        val = float(st.session_state[key])
+        min_val, max_val = RANGES[key]
+        return max(min_val, min(val, max_val))
+    except:
+        return DEFAULTS[key]
+
+safe_initialize()
+clamp_session_state()
 
 # ================================================================
-# HELPER FUNCTIONS
+# 3. FEATURE ENGINEERING
 # ================================================================
-def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
-    comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
-    total = np.sum(comps)
-    if total <= 0: total = 1.0
-    norm = (comps / total) * 100
-    return {'api': norm[0], 'binder': norm[1], 'pvpp': norm[2],
-            'mgst': norm[3], 'mcc': norm[4], 'moisture': norm[5]}
 
-def validate_formulation(api, binder, pvpp, mgst, mcc, moisture):
-    total = sum([api, binder, pvpp, mgst, mcc, moisture])
-    return (95 <= total <= 105, f"Total is {total:.1f}% – should be ~100%")
+def add_interaction_features(X_raw):
+    pressure = X_raw[:, 5:6]
+    binder = X_raw[:, 4:5]
+    api = X_raw[:, 0:1]
+    speed = X_raw[:, 6:7]
+    mcc = X_raw[:, 1:2]
 
-def calculate_quality_score(density, tensile, efrf, api=None):
-    density_score = min(100, (density / 0.95) * 100)
-    tensile_score = min(100, (tensile / 8.5) * 100)
-    efrf_score = max(0, (1 - efrf) * 100)
-    weights = {'density': 0.4, 'tensile': 0.3, 'efrf': 0.3}
-    overall = (density_score * weights['density'] +
-               tensile_score * weights['tensile'] +
-               efrf_score * weights['efrf'])
-    if api is not None:
-        api_score = (api - 80) / 18 * 100
-        overall = 0.7 * overall + 0.3 * api_score
-        return {'overall': overall, 'density_score': density_score,
-                'tensile_score': tensile_score, 'efrf_score': efrf_score,
-                'api_score': api_score, 'weights': {**weights, 'api': 0.3}}
-    else:
-        return {'overall': overall, 'density_score': density_score,
-                'tensile_score': tensile_score, 'efrf_score': efrf_score, 'weights': weights}
+    pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
+    api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
+    binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
+
+    pressure_binder = pressure * binder
+    pressure_api = pressure * api
+
+    return np.concatenate([
+        X_raw, pressure_binder, pressure_api,
+        pressure_speed, api_mcc, binder_speed
+    ], axis=1)
 
 # ================================================================
-# SCALER & HYBRID PINN MODEL
+# 4. OOD SHRINKAGE (from v32.3)
 # ================================================================
-class InputScaler:
-    def fit(self, X): 
-        self.mean_ = X.mean(axis=0)
-        self.std_ = X.std(axis=0)
-        self.std_[self.std_ < 1e-8] = 1.0
-        return self
-    def transform(self, X): 
-        return (X - self.mean_) / self.std_
 
-class HybridTabletModel(nn.Module):
-    def __init__(self, input_dim=8, hidden_dim=HIDDEN_SIZE):
-        super().__init__()
-        self.fc1, self.bn1 = nn.Linear(input_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
-        self.fc2, self.bn2 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
-        self.fc3, self.bn3 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
-        self.fc4, self.bn4 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
-        self.fc5, self.dropout = nn.Linear(hidden_dim, 5), nn.Dropout(0.1)
-        for m in self.modules():
-            if isinstance(m, nn.Linear): nn.init.xavier_uniform_(m.weight); nn.init.zeros_(m.bias)
+def apply_ood_shrinkage(pred, pop_scaled, y_train_mean):
+    """
+    Shrink density, tensile, and elastic recovery toward training means
+    when inputs are out-of-distribution.
+    pred: array of shape (n, 3) with columns [density, tensile, er]
+    pop_scaled: scaled input features (n, n_features)
+    y_train_mean: means of training targets [mean_density, mean_tensile, mean_er]
+    Returns (density, tensile, er) after shrinkage.
+    """
+    density, tensile, er = pred[:, 0], pred[:, 1], pred[:, 2]
+    # Use all scaled features to compute OOD magnitude
+    ood_z = np.abs(pop_scaled)
+    ood_raw = np.clip(ood_z - 2.0, 0, None).sum(axis=-1)
+    shrink_factor = 1.0 / (1.0 + ood_raw)
+    density = shrink_factor * density + (1 - shrink_factor) * y_train_mean[0]
+    tensile = shrink_factor * tensile + (1 - shrink_factor) * y_train_mean[1]
+    er = shrink_factor * er + (1 - shrink_factor) * y_train_mean[2]
+    return density, tensile, er
 
-    def forward(self, x):
-        h1 = torch.relu(self.bn1(self.fc1(x))); h1 = self.dropout(h1)
-        h2 = torch.relu(self.bn2(self.fc2(h1)))+h1; h2 = self.dropout(h2)
-        h3 = torch.relu(self.bn3(self.fc3(h2)))+h2; h3 = self.dropout(h3)
-        out = self.fc5(h3)
-        density = torch.sigmoid(out[:,0])*0.4+0.55
-        tensile = torch.sigmoid(out[:,1])*8.0+0.5
-        efrf = torch.sigmoid(out[:,2])
-        disintegration = torch.sigmoid(out[:,3])*45.0+2.0
-        dissolution = torch.sigmoid(out[:,4])*80.0+10.0
-        return torch.stack([density, tensile, efrf, disintegration, dissolution], 1)
+# ================================================================
+# 5. SIMPLIFIED MULTI-TASK PINN MODEL (with MC-Dropout)
+# ================================================================
 
-    def predict_with_uncertainty(self, x, n_samples=20):
+class MultiTaskTruePINN(nn.Module):
+    def __init__(self, input_dim=13, output_dim=5):
+        super(MultiTaskTruePINN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.05),          # Dropout for uncertainty
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.05),
+            nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Linear(16, output_dim)
+        )
+        self.loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
+        self.y_train_mean = None       # Will be set after training
+
+    def forward(self, X):
+        raw = self.network(X)
+        density = torch.sigmoid(raw[:, 0:1])
+        tensile = torch.nn.functional.softplus(raw[:, 1:2])
+        er = torch.nn.functional.softplus(raw[:, 2:3])
+        k = torch.nn.functional.softplus(raw[:, 3:4])
+        A = raw[:, 4:5]
+        return torch.cat([density, tensile, er, k, A], dim=1)
+
+    def predict(self, X_scaled):
+        self.eval()
+        with torch.no_grad():
+            if not isinstance(X_scaled, torch.Tensor):
+                X_scaled = torch.FloatTensor(X_scaled)
+            output = self.forward(X_scaled)
+            # Return only first three: density, tensile, er
+            return output[:, :3].numpy()
+
+    def predict_with_uncertainty(self, X_scaled, n_samples=20):
+        """Monte Carlo Dropout for uncertainty."""
         self.train()
         with torch.no_grad():
-            if not torch.is_tensor(x): x = torch.tensor(x, dtype=torch.float32)
-            x_repeat = x.repeat(n_samples, 1)
-            preds = self.forward(x_repeat).numpy().reshape(n_samples, -1, 5)
+            if not isinstance(X_scaled, torch.Tensor):
+                X_scaled = torch.FloatTensor(X_scaled)
+            X_repeat = X_scaled.repeat(n_samples, 1)
+            preds = self.forward(X_repeat).numpy().reshape(n_samples, -1, 5)
         self.eval()
-        return np.mean(preds, 0), np.std(preds, 0)
+        # Return mean and std for density, tensile, er (first 3)
+        mean = np.mean(preds[:, :, :3], axis=0)
+        std = np.std(preds[:, :, :3], axis=0)
+        return mean, std
+
+    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=3000,
+                     w_data=DATA_WEIGHT,
+                     w_physics=PHYSICS_WEIGHT,
+                     w_efrf=EFRF_CONSTRAINT_WEIGHT,
+                     w_mcc=0.1, w_density=0.1,
+                     efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                     compute_grad=False, record_loss=False):
+        pressure_real = X_raw[:, 5]
+        mcc_real = X_raw[:, 1]
+
+        y_pred = self.forward(X_scaled)
+        density_pred = y_pred[:, 0]
+        tensile_pred = y_pred[:, 1]
+        er_pred = y_pred[:, 2]
+        k_pred = y_pred[:, 3]
+        A_pred = y_pred[:, 4]
+
+        # Data loss on density, tensile, er (first three)
+        data_loss = nn.MSELoss()(y_pred[:, :3], y_true)
+
+        # Physics: Heckel equation
+        D_clamped = torch.clamp(density_pred, 0.01, 0.99)
+        heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
+        heckel_target = k_pred * pressure_real + A_pred
+        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+
+        # EFRF = er / tensile
+        efrf_pred = er_pred / (tensile_pred + 1e-8)
+        # EFRF constraint loss (penalize if > target)
+        efrf_constraint = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
+
+        # MCC and density penalties
+        mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+        density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
+
+        # Monotonicity (∂D/∂P > 0) - optional, compute gradient if required
+        if compute_grad:
+            if not X_scaled.requires_grad:
+                X_scaled.requires_grad_(True)
+            y_pred_grad = self.forward(X_scaled)
+            density_grad = y_pred_grad[:, 0]
+            grad_density = torch.autograd.grad(
+                outputs=density_grad,
+                inputs=X_scaled,
+                grad_outputs=torch.ones_like(density_grad),
+                create_graph=True, retain_graph=True
+            )[0]
+            grad_pressure = grad_density[:, 5]
+            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+        else:
+            monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
+
+        # Boundary constraints
+        mask_low = (pressure_real < 120).float()
+        mask_high = (pressure_real > 230).float()
+        boundary_loss = (
+            torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
+            torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
+        )
+
+        # Regularization on k and A
+        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
+        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
+
+        # Total physics loss (all residual terms)
+        physics_loss = heckel_loss + efrf_constraint + monotonic_loss + boundary_loss
+
+        total_loss = (
+            w_data * data_loss +
+            w_physics * physics_loss +
+            w_efrf * efrf_constraint +   # extra weight on EFRF
+            w_mcc * mcc_loss +
+            w_density * density_penalty +
+            0.01 * k_reg + 0.01 * A_reg
+        )
+
+        loss_dict = {
+            'data_loss': data_loss.item(),
+            'physics_loss': physics_loss.item(),
+            'total_loss': total_loss.item()
+        }
+
+        if record_loss:
+            self.loss_history['train'].append(total_loss.item())
+            self.loss_history['data'].append(data_loss.item())
+            self.loss_history['physics'].append(physics_loss.item())
+
+        return total_loss, loss_dict
 
 # ================================================================
-# DATA GENERATION & PHYSICS
+# 6. DATA GENERATION (supports real data)
 # ================================================================
-def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
-    rng = np.random.default_rng(seed)
-    api = rng.uniform(API_MIN, API_MAX, n_samples)
-    binder = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
-    pvpp = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
-    mgst = rng.uniform(MGST_MIN, MGST_MAX, n_samples)
-    mcc = rng.uniform(MCC_MIN, MCC_MAX, n_samples)
-    moisture = rng.uniform(MOISTURE_MIN, MOISTURE_MAX, n_samples)
-    pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
-    speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
 
-    X = np.column_stack([api, binder, pvpp, mgst, mcc, moisture, pressure, speed]).astype(np.float32)
-    density = np.clip(0.55 + 0.3 * (pressure-150)/100 - 0.01*(binder-3.0) + rng.normal(0,0.01,n_samples), 0.55, 0.95)
-    tensile = np.clip(1.0 + 6.0*(density-0.55) + 0.2*(api-80)/18 - 0.5*(mgst-0.1) + rng.normal(0,0.2,n_samples), 0.5, 8.5)
-    efrf = np.clip(0.6 - 0.5*(density-0.55) + 0.2*(mgst-0.1) + rng.normal(0,0.05,n_samples), 0.02, 0.98)
-    disintegration = np.clip(10.0 - 2.0*(pvpp-1.0)/5.0 + 3.0*(binder-1.4)/4.6 + rng.normal(0,1.0,n_samples), 2.0, 45.0)
-    dissolution = np.clip(2.0*disintegration + 10.0 + rng.normal(0,2.0,n_samples), 10.0, 90.0)
-    y = np.column_stack([density, tensile, efrf, disintegration, dissolution]).astype(np.float32)
-    return X, y
+def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
+    np.random.seed(random_state)
+    X = np.zeros((n_samples, 8))
+    y = np.zeros((n_samples, 3))
 
-def calculate_heckel_density(pressure, binder):
-    return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
+    for i in range(n_samples):
+        if i < n_samples // 2:
+            api = np.random.uniform(85, 95)
+            binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
+            mgst = np.random.uniform(0.01, 1.2)
+            pvpp = np.random.uniform(0.5, 6.0)
+            mcc = np.random.uniform(0, MCC_MAX)
+            pressure = np.random.uniform(80, PRESSURE_MAX)
+            speed = np.random.uniform(1, 50)
+            granule = np.random.uniform(30, 250)
+        else:
+            api = np.clip(np.random.normal(90.5, 1.5), 85, 95)
+            binder = np.clip(np.random.normal(2.8, 0.4), BINDER_MIN, BINDER_MAX)
+            mgst = np.clip(np.random.normal(0.15, 0.06), 0.01, 1.2)
+            pvpp = np.clip(np.random.normal(3.0, 0.5), 0.5, 6.0)
+            mcc = np.clip(np.random.normal(5.0, 1.0), 0, MCC_MAX)
+            pressure = np.clip(np.random.normal(230, 15), 80, PRESSURE_MAX)
+            speed = np.clip(np.random.normal(10, 3), 1, 50)
+            granule = np.clip(np.random.normal(125, 20), 30, 250)
 
-# ================================================================
-# TRAINING LOOP (Stable Cache, Progress bar, Physics Loss)
-# ================================================================
-CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_v32_ultimate.pt')
+        total = api + binder + mgst + pvpp + mcc
+        if total > 100:
+            scale = 100 / total
+            api *= scale; binder *= scale; mgst *= scale; pvpp *= scale; mcc *= scale
+        else:
+            remainder = 100 - total
+            if mcc + remainder <= MCC_MAX:
+                mcc += remainder
+            else:
+                excess = (mcc + remainder) - MCC_MAX
+                mcc = MCC_MAX
+                api -= excess
 
-@st.cache_resource(show_spinner=False)
-def train_model():
-    if os.path.exists(CHECKPOINT_PATH):
-        try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            model = HybridTabletModel(input_dim=8, hidden_dim=HIDDEN_SIZE)
-            model.load_state_dict(ckpt['model_state'])
-            model.eval()
-            return model, ckpt['scaler']
-        except: pass
+        api = np.clip(api, 85, 95)
+        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+        mgst = np.clip(mgst, 0.01, 1.2)
+        pvpp = np.clip(pvpp, 0.5, 6.0)
+        mcc = np.clip(mcc, 0, MCC_MAX)
 
-    X, y = generate_synthetic_data(n_samples=N_SAMPLES)
-    scaler = InputScaler().fit(X)
-    X_scaled = scaler.transform(X)
-    X_t, y_t = torch.tensor(X_scaled, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
-    
-    model = HybridTabletModel(input_dim=8, hidden_dim=HIDDEN_SIZE)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    target_var = torch.clamp(y_t.var(0, unbiased=False), min=1e-6)
-    def mse(pred, true): return (((pred - true) ** 2) / target_var).mean()
-    
-    pressure_input, binder_input = X[:, 6], X[:, 1]
-    best_loss = np.inf; patience = 0
-    
-    for epoch in range(TRAINING_EPOCHS):
-        model.train(); opt.zero_grad(); pred = model(X_t)
-        loss = mse(pred, y_t)
-        physical = torch.tensor(calculate_heckel_density(pressure_input, binder_input), dtype=torch.float32)
-        physics_loss = torch.mean((pred[:, 0] - physical) ** 2) * 0.1
-        loss += physics_loss
-        loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
-        
-        if epoch % 10 == 0:
-            if '_train_pb' in st.session_state and st.session_state['_train_pb'] is not None:
-                st.session_state['_train_pb'].progress(epoch / TRAINING_EPOCHS)
-            time.sleep(0.01)
-            
-        if epoch % 100 == 0:
-            val = mse(model(X_t), y_t).item()
-            if val < best_loss: best_loss = val; patience = 0
-            else: patience += 1
-            if patience >= EARLY_STOPPING_PATIENCE: break
-            
-    model.eval()
-    torch.save({'model_state': model.state_dict(), 'scaler': scaler}, CHECKPOINT_PATH)
-    return model, scaler
+        X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+
+        k_true = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
+        k_true = max(k_true, 0.008)
+        A_true = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
+        D = np.clip(1 - np.exp(-(k_true * pressure + A_true)), 0.4, 0.99)
+        strength = np.clip(3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100) - 1.5 * mgst - 0.02 * (speed - 10), 0.5, 6.0)
+        er = np.clip(1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150, 0.5, 4.0)
+        y[i] = [D, strength, er]
+
+    feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
+                     'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
+    df = pd.DataFrame(X, columns=feature_names)
+    df['Density'] = y[:, 0]
+    df['Tensile_Strength_MPa'] = y[:, 1]
+    df['Elastic_Recovery_%'] = y[:, 2]
+    return df, feature_names
 
 # ================================================================
-# ADVANCED OPTIMIZER (NSGA-II + Adaptive Mutation)
+# 7. PDF GENERATION (unchanged)
 # ================================================================
-class AdvancedOptimizer:
-    def __init__(self, model, scaler, pop_size=POPULATION_SIZE, generations=NSGA_GENERATIONS):
-        self.model, self.scaler = model, scaler
-        self.pop_size, self.generations = pop_size, generations
-        self.mutation_rate = 0.1
-        self.GENE_BOUNDS = [
-            (API_MIN, API_MAX), (BINDER_MIN, BINDER_MAX), (PVPP_MIN, PVPP_MAX),
-            (MGST_MIN, MGST_MAX), (MCC_MIN, MCC_MAX), (MOISTURE_MIN, MOISTURE_MAX),
-            (PRESSURE_MIN, PRESSURE_MAX), (SPEED_MIN, SPEED_MAX)
-        ]
 
-    def enforce_mass_balance(self, pop):
+def sanitize_text(text):
+    replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
+                    '✅': '[PASS]', '❌': '[FAIL]', '⚠️': '[WARNING]'}
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+@st.cache_data
+def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                             density, tensile, er, efrf, status, timestamp,
+                             model_comparison_df=None, loss_history=None):
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
+    pdf.set_font("Arial", "I", 11)
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II)"), ln=True, align="C")
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.set_text_color(0, 0, 150)
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True, align="C")
+    pdf.set_font("Arial", "I", 10)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 6, "Nile Valley University, Postgraduate College, Sudan", ln=True, align="C")
+    pdf.ln(5)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("1. Formulation Summary"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    components = [("API", f"{api:.1f}%", "Paracetamol"),
+                  ("MCC", f"{mcc:.1f}%", "Filler/Binder"),
+                  ("PVPP", f"{pvpp:.1f}%", "Superdisintegrant"),
+                  ("Mg-St", f"{mgst:.2f}%", "Lubricant"),
+                  ("Binder", f"{binder:.1f}%", "Binding Agent"),
+                  ("TOTAL", f"{api+binder+pvpp+mgst+mcc:.1f}%", "100% Complete")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(50, 6, sanitize_text("Component"), 1, 0, "C")
+    pdf.cell(30, 6, sanitize_text("Value"), 1, 0, "C")
+    pdf.cell(80, 6, sanitize_text("Function"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for comp, val, func in components:
+        pdf.cell(50, 6, sanitize_text(comp), 1, 0, "L")
+        pdf.cell(30, 6, sanitize_text(val), 1, 0, "C")
+        pdf.cell(80, 6, sanitize_text(func), 1, 1, "L")
+
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("2. Process Parameters"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    params = [("Compaction Pressure", f"{pressure:.1f} MPa"),
+              ("Punch Speed", f"{speed:.1f} rpm"),
+              ("Granule Size", f"{granule:.1f} um")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(60, 6, sanitize_text("Parameter"), 1, 0, "C")
+    pdf.cell(60, 6, sanitize_text("Value"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for p, v in params:
+        pdf.cell(60, 6, sanitize_text(p), 1, 0, "L")
+        pdf.cell(60, 6, sanitize_text(v), 1, 1, "C")
+
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    results = [("Density", f"{density:.3f}", "-"),
+               ("Tensile Strength", f"{tensile:.3f} MPa", f">= {TENSILE_MIN:.2f} MPa"),
+               ("Elastic Recovery", f"{er:.3f} %", "-"),
+               ("EFRF", f"{efrf:.4f}", f"< {EFRF_MAX:.2f}")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(45, 6, sanitize_text("Metric"), 1, 0, "C")
+    pdf.cell(35, 6, sanitize_text("Value"), 1, 0, "C")
+    pdf.cell(45, 6, sanitize_text("Threshold"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for r in results:
+        pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
+        pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
+        pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
+
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
+    pdf.set_font("Arial", "B", 14)
+    if status == "PASS":
+        pdf.set_text_color(0, 128, 0)
+        pdf.cell(0, 8, sanitize_text("PASS - Formulation Satisfies All Constraints"), ln=True, align="C")
+    else:
+        pdf.set_text_color(255, 0, 0)
+        pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    if model_comparison_df is not None and not model_comparison_df.empty:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("5. Model Performance Comparison"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("R²"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("MAE"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("Physics"), 1, 1, "C")
+
+        pdf.set_font("Arial", "", 10)
+        for _, row in model_comparison_df.iterrows():
+            pdf.cell(40, 6, sanitize_text(str(row['Model'])), 1, 0, "L")
+            pdf.cell(30, 6, f"{row['R²']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['RMSE']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['MAE']:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
+        pdf.ln(4)
+
+    if loss_history and len(loss_history['train']) > 0:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
+        pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("7. Recommendations"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    if status == "PASS":
+        recs = ["1. Proceed with experimental validation.",
+                "2. Confirm tensile strength with physical testing.",
+                "3. Evaluate disintegration time and dissolution.",
+                "4. Assess stability under ICH conditions.",
+                "5. Scale-up for process optimization."]
+    else:
+        recs = ["1. Reduce API or adjust binder concentration.",
+                "2. Optimize Mg-St level.",
+                "3. Increase compaction pressure.",
+                "4. Reduce punch speed.",
+                "5. Re-run with adjusted parameters."]
+
+    for rec in recs:
+        pdf.cell(0, 6, sanitize_text(rec), ln=True)
+
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("8. Contact Information"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 11)
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
+    pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
+    pdf.cell(0, 7, "Phone: +249-123-638-638", ln=True)
+    pdf.cell(0, 7, "Nile Valley University, Postgraduate College, Sudan", ln=True)
+
+    pdf.ln(3)
+    pdf.set_y(270)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v32.1", ln=True, align="C")
+
+    pdf_bytes = pdf.output(dest="S")
+    if isinstance(pdf_bytes, bytearray):
+        return bytes(pdf_bytes)
+    elif isinstance(pdf_bytes, bytes):
+        return pdf_bytes
+    else:
+        return str(pdf_bytes).encode('latin1')
+
+# ================================================================
+# 8. NSGA-II (with iterative mass balance & OOD shrinkage)
+# ================================================================
+
+class NSGAII:
+    def __init__(self, model, scaler, bounds,
+                 pop_size=NSGA_POP_SIZE,
+                 n_generations=NSGA_GENERATIONS,
+                 w_tensile=0.0,
+                 y_train_mean=None):
+        self.model = model
+        self.scaler = scaler
+        self.bounds = bounds
+        self.pop_size = pop_size
+        self.n_generations = n_generations
+        self.w_tensile = w_tensile
+        self.y_train_mean = y_train_mean if y_train_mean is not None else [0.7, 2.5, 1.5]  # fallback
+        self.population = None
+        self.objectives = None
+        self.constraints = None
+        self.tensile = None
+        self.fronts = None
+
+    def _enforce_mass_balance(self, pop, iters=5, tol=1e-6):
+        """Iterative projection of composition to sum=100% within bounds."""
         balanced = pop.copy()
-        lo = np.array([b[0] for b in self.GENE_BOUNDS[:6]])
-        hi = np.array([b[1] for b in self.GENE_BOUNDS[:6]])
-        comps = np.clip(pop[:, :6], lo, hi)
-        total = comps.sum(axis=1, keepdims=True)
-        balanced[:, :6] = np.clip(comps / (total if (total > 0).all() else 1.0) * 100.0, lo, hi)
+        lo = np.array([b[0] for b in self.bounds[:6]])   # first 6 are formulation components
+        hi = np.array([b[1] for b in self.bounds[:6]])
+        f = np.clip(pop[:, :6], lo, hi)
+        for _ in range(iters):
+            total = f.sum(axis=1, keepdims=True)
+            total = np.where(total <= 0, 1.0, total)
+            f_new = np.clip((f / total) * 100.0, lo, hi)
+            if np.max(np.abs(f_new - f)) < tol:
+                f = f_new
+                break
+            f = f_new
+        balanced[:, :6] = f
         return balanced
 
-    def evaluate(self, pop):
-        pop_scaled = self.scaler.transform(pop)
-        if isinstance(pop_scaled, pd.DataFrame): pop_scaled = pop_scaled.values
-        self.model.eval()
-        with torch.no_grad():
-            pred = self.model(torch.tensor(pop_scaled, dtype=torch.float32)).numpy()
-        density, tensile, efrf = pred[:, 0], pred[:, 1], pred[:, 2]
-        penalty = 1.0 / (1.0 + np.clip(np.abs(pop_scaled) - 2.5, 0, None).sum(axis=1))
-        fitness = np.column_stack([-density*penalty, -tensile*penalty, -pop[:,0]*penalty, efrf*penalty])
-        fitness[:, 3] += np.maximum(0, efrf - EFRF_THRESHOLD) * 20.0
-        return fitness
+    def _initialize_population(self):
+        pop = np.zeros((self.pop_size, 8))
+        for i in range(8):
+            pop[:, i] = np.random.uniform(self.bounds[i, 0], self.bounds[i, 1], self.pop_size)
+        pop = self._enforce_mass_balance(pop)
+        return pop
 
-    def adaptive_mutation(self, pop):
-        diversity = np.std(pop, axis=0).mean()
-        if diversity < 0.05: self.mutation_rate = min(0.2, self.mutation_rate + 0.02)
-        elif diversity > 0.2: self.mutation_rate = max(0.02, self.mutation_rate - 0.01)
-        return diversity
+    def _evaluate(self, population):
+        n = population.shape[0]
+        objectives = np.zeros((n, 2))
+        constraints = np.zeros(n, dtype=bool)
+        tensile_strengths = np.zeros(n)
 
-    def optimize(self):
-        pop = np.random.rand(self.pop_size, 8)
-        for i, (lo, hi) in enumerate(self.GENE_BOUNDS): pop[:, i] = pop[:, i] * (hi - lo) + lo
-        pop = self.enforce_mass_balance(pop)
-        obj = self.evaluate(pop)
-        history = []
-        for gen in range(self.generations):
-            self.adaptive_mutation(pop)
-            selected = []
-            for _ in range(self.pop_size):
-                idx = np.random.choice(self.pop_size, 2, replace=False)
-                selected.append(idx[np.argmin(obj[idx].sum(axis=1))])
-            sel_pop = pop[selected]
+        for i in range(n):
+            try:
+                api, mcc, pvpp, mgst, binder, pressure, speed, granule = population[i]
+                # Mass balance already enforced, but clip to be safe
+                api = np.clip(api, 85, 95)
+                binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+                mgst = np.clip(mgst, 0.01, 1.2)
+                pvpp = np.clip(pvpp, 0.5, 6.0)
+                mcc = np.clip(mcc, 0, MCC_MAX)
+
+                inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+                inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+                inputs_scaled = self.scaler.transform([inputs_with_features])
+                X_tensor = torch.FloatTensor(inputs_scaled)
+
+                with torch.no_grad():
+                    pred_raw = self.model.predict(X_tensor)[0]  # [density, tensile, er]
+                # Apply OOD shrinkage
+                density, tensile, er = apply_ood_shrinkage(
+                    pred_raw.reshape(1, -1),
+                    inputs_scaled,
+                    self.y_train_mean
+                )
+                density = float(density[0]); tensile = float(tensile[0]); er = float(er[0])
+
+                if tensile < 0.01:
+                    tensile = 0.01
+                    efrf = 10.0
+                else:
+                    efrf = er / tensile
+                    efrf = max(0.0001, min(efrf, 5.0))
+
+                constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
+                objectives[i, 0] = -api - self.w_tensile * tensile
+                objectives[i, 1] = efrf
+                tensile_strengths[i] = tensile
+                population[i, 0] = api
+                population[i, 1] = mcc
+                population[i, 2] = pvpp
+                population[i, 3] = mgst
+                population[i, 4] = binder
+
+            except Exception:
+                objectives[i, 0] = 100.0
+                objectives[i, 1] = 100.0
+                constraints[i] = False
+                tensile_strengths[i] = 0.0
+
+        return objectives, constraints, tensile_strengths, population
+
+    def _fast_non_dominated_sort(self, objectives, constraints):
+        n = objectives.shape[0]
+        S = [[] for _ in range(n)]
+        n_dom = np.zeros(n)
+        rank = np.zeros(n, dtype=int)
+        fronts = []
+        constraint_violation = ~constraints
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if (constraint_violation[i] < constraint_violation[j]) or \
+                   (constraint_violation[i] == constraint_violation[j] and
+                    objectives[i, 0] <= objectives[j, 0] and
+                    objectives[i, 1] <= objectives[j, 1] and
+                    (objectives[i, 0] < objectives[j, 0] or objectives[i, 1] < objectives[j, 1])):
+                    S[i].append(j)
+                elif (constraint_violation[j] < constraint_violation[i]) or \
+                     (constraint_violation[i] == constraint_violation[j] and
+                      objectives[j, 0] <= objectives[i, 0] and
+                      objectives[j, 1] <= objectives[i, 1] and
+                      (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1])):
+                    n_dom[i] += 1
+            if n_dom[i] == 0:
+                rank[i] = 0
+                if not fronts:
+                    fronts.append([])
+                fronts[0].append(i)
+
+        i = 0
+        while fronts[i]:
+            next_front = []
+            for p in fronts[i]:
+                for q in S[p]:
+                    n_dom[q] -= 1
+                    if n_dom[q] == 0:
+                        rank[q] = i + 1
+                        next_front.append(q)
+            i += 1
+            fronts.append(next_front)
+        if not fronts[-1]:
+            fronts.pop()
+        return fronts, rank
+
+    def _crowding_distance(self, objectives, front):
+        n = len(front)
+        if n <= 2:
+            return np.ones(n) * np.inf
+        distance = np.zeros(n)
+        obj_min = objectives.min(axis=0)
+        obj_max = objectives.max(axis=0)
+        obj_range = obj_max - obj_min
+        obj_range[obj_range == 0] = 1
+        for m in range(2):
+            sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
+            distance[sorted_idx[0]] = np.inf
+            distance[sorted_idx[-1]] = np.inf
+            for i in range(1, n - 1):
+                if distance[sorted_idx[i]] != np.inf:
+                    diff = objectives[front[sorted_idx[i+1]], m] - objectives[front[sorted_idx[i-1]], m]
+                    distance[sorted_idx[i]] += diff / obj_range[m]
+        return distance
+
+    def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
+        n = len(pop_indices)
+        selected = []
+        for _ in range(n):
+            i1, i2 = np.random.choice(pop_indices, 2, replace=False)
+            if ranks[i1] < ranks[i2]:
+                selected.append(i1)
+            elif ranks[i1] > ranks[i2]:
+                selected.append(i2)
+            else:
+                if crowding[i1] > crowding[i2]:
+                    selected.append(i1)
+                else:
+                    selected.append(i2)
+        return selected
+
+    def _simulated_binary_crossover(self, parent1, parent2):
+        if np.random.random() > 0.9:
+            return parent1.copy(), parent2.copy()
+        eta_c = 20
+        child1 = np.zeros(8)
+        child2 = np.zeros(8)
+        for i in range(8):
+            if np.random.random() < 0.5:
+                u = np.random.random()
+                if u <= 0.5:
+                    beta = (2 * u) ** (1 / (eta_c + 1))
+                else:
+                    beta = (1 / (2 * (1 - u))) ** (1 / (eta_c + 1))
+                child1[i] = 0.5 * ((1 + beta) * parent1[i] + (1 - beta) * parent2[i])
+                child2[i] = 0.5 * ((1 - beta) * parent1[i] + (1 + beta) * parent2[i])
+            else:
+                child1[i] = parent1[i]
+                child2[i] = parent2[i]
+        for i in range(8):
+            child1[i] = np.clip(child1[i], self.bounds[i, 0], self.bounds[i, 1])
+            child2[i] = np.clip(child2[i], self.bounds[i, 0], self.bounds[i, 1])
+        return child1, child2
+
+    def _polynomial_mutation(self, individual):
+        eta_m = 20
+        mutated = individual.copy()
+        for i in range(8):
+            if np.random.random() < 0.01:
+                u = np.random.random()
+                delta = min(u, 1 - u) ** (1 / (eta_m + 1))
+                if u < 0.5:
+                    mutated[i] = individual[i] + delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                else:
+                    mutated[i] = individual[i] - delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                mutated[i] = np.clip(mutated[i], self.bounds[i, 0], self.bounds[i, 1])
+        return mutated
+
+    def run(self):
+        self.population = self._initialize_population()
+        for gen in range(self.n_generations):
+            objectives, constraints, tensile, pop = self._evaluate(self.population)
+            self.population = pop
+            self.objectives = objectives
+            self.constraints = constraints
+            self.tensile = tensile
+            fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
+            self.fronts = fronts
+            if gen == self.n_generations - 1:
+                break
+            crowding = np.zeros(self.pop_size)
+            for front in fronts:
+                dist = self._crowding_distance(objectives, front)
+                crowding[front] = dist
+            selected = self._tournament_selection(range(self.pop_size), objectives, ranks, crowding)
             offspring = []
-            for i in range(0, self.pop_size, 2):
-                p1, p2 = sel_pop[i], sel_pop[(i+1)%self.pop_size]
-                c1, c2 = p1.copy(), p2.copy()
-                for j in range(8):
-                    if np.random.rand() < 0.8:
-                        beta = 1.0 + 2.0 * np.random.rand()
-                        c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
-                        c2[j] = 0.5 * ((1-beta)*p1[j] + (1+beta)*p2[j])
-                    if np.random.rand() < self.mutation_rate:
-                        lo, hi = self.GENE_BOUNDS[j]
-                        c1[j] = np.clip(c1[j] + np.random.normal(0, 0.1) * (hi-lo), lo, hi)
-                offspring.extend([c1, c2])
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self._simulated_binary_crossover(self.population[selected[i]], self.population[selected[i+1]])
+                    child1 = self._polynomial_mutation(child1)
+                    child2 = self._polynomial_mutation(child2)
+                    offspring.append(child1)
+                    offspring.append(child2)
+                else:
+                    child = self._polynomial_mutation(self.population[selected[i]])
+                    offspring.append(child)
             offspring = np.array(offspring[:self.pop_size])
-            offspring = self.enforce_mass_balance(offspring)
-            combined = np.vstack([pop, offspring])
-            combined_obj = np.vstack([obj, self.evaluate(offspring)])
-            pareto_idx = np.argsort(combined_obj.sum(axis=1))[:self.pop_size]
-            pop, obj = combined[pareto_idx], combined_obj[pareto_idx]
-            if gen % 10 == 0 or gen == self.generations - 1:
-                history.append({'generation': gen, 'population': pop.copy(), 'objectives': obj.copy()})
-            yield pop, obj, history, gen
+            # Enforce mass balance on offspring
+            offspring = self._enforce_mass_balance(offspring)
+            objectives_off, constraints_off, tensile_off, _ = self._evaluate(offspring)
+            combined_pop = np.vstack([self.population, offspring])
+            combined_obj = np.vstack([self.objectives, objectives_off])
+            combined_const = np.concatenate([self.constraints, constraints_off])
+            combined_fronts, combined_ranks = self._fast_non_dominated_sort(combined_obj, combined_const)
+            combined_crowding = np.zeros(len(combined_pop))
+            for front in combined_fronts:
+                dist = self._crowding_distance(combined_obj, front)
+                combined_crowding[front] = dist
+            new_pop = []
+            new_obj = []
+            new_const = []
+            for front in combined_fronts:
+                if len(new_pop) + len(front) <= self.pop_size:
+                    for idx in front:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                else:
+                    front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
+                    remaining = self.pop_size - len(new_pop)
+                    for idx in front_sorted[:remaining]:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                    break
+            self.population = np.array(new_pop)
+            self.objectives = np.array(new_obj)
+            self.constraints = np.array(new_const)
+
+        objectives, constraints, tensile, pop = self._evaluate(self.population)
+        self.population = pop
+        self.objectives = objectives
+        self.constraints = constraints
+        self.tensile = tensile
+        self.fronts, _ = self._fast_non_dominated_sort(objectives, constraints)
+        return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# ANALYSIS & PLOTTING FUNCTIONS
+# 9. TRAIN MODEL (with real data support & OOD mean storage)
 # ================================================================
-def perform_sensitivity_analysis(model, scaler, ref_solution):
-    try:
-        rf = RandomForestRegressor(n_estimators=50)
-        X_local = np.random.normal(loc=ref_solution, scale=0.05*np.abs(ref_solution), size=(500, 8))
-        bounds_min = np.array([API_MIN, BINDER_MIN, PVPP_MIN, MGST_MIN, MCC_MIN, MOISTURE_MIN, PRESSURE_MIN, SPEED_MIN])
-        bounds_max = np.array([API_MAX, BINDER_MAX, PVPP_MAX, MGST_MAX, MCC_MAX, MOISTURE_MAX, PRESSURE_MAX, SPEED_MAX])
-        X_local = np.clip(X_local, bounds_min, bounds_max)
-        X_scaled = scaler.transform(X_local)
-        y_local = model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()[:, 0]
-        rf.fit(X_scaled, y_local)
-        perm_importance = permutation_importance(rf, X_scaled, y_local)
-        feature_names = ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture', 'Pressure', 'Speed']
-        return dict(zip(feature_names, perm_importance.importances_mean))
-    except: return None
 
-def render_2d_pareto_evolution(pareto_history, golden, tested=None):
-    if not pareto_history: return
-    generations_recorded = [h['generation'] for h in pareto_history]
-    gen_slider = st.select_slider("Select generation to view", options=generations_recorded, value=generations_recorded[-1])
-    current_entry = next(h for h in pareto_history if h['generation'] == gen_slider)
-    obj = current_entry['objectives']; pop = current_entry['population']
-    api_vals, efrf_vals = pop[:, 0], obj[:, 3]
-    feasible_mask = efrf_vals < 0.40
-    api_feas, efrf_feas = api_vals[feasible_mask], efrf_vals[feasible_mask]
-    sort_idx = np.argsort(api_feas)
-    api_sorted, efrf_sorted = api_feas[sort_idx], efrf_feas[sort_idx]
-    if len(efrf_sorted) > 0: cummax_efrf = np.maximum.accumulate(efrf_sorted)
-    else: cummax_efrf = efrf_sorted
-
-    fig = go.Figure()
-    fig.add_hrect(y0=0, y1=0.40, x0=API_MIN, x1=API_MAX, fillcolor='rgba(144, 238, 144, 0.25)', line_width=0, layer='below')
-    fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, symbol='square', color='rgba(144, 238, 144, 0.5)'), name='Feasible region (EFRF < 0.40)'))
-    
-    fig.add_trace(go.Scatter(x=api_sorted, y=cummax_efrf, mode='lines+markers', name='Pareto Front', line=dict(color='red', width=2), marker=dict(size=8, color='#a3c4f3', line=dict(width=1, color='#4a6fa5'))))
-    
-    if golden:
-        fig.add_trace(go.Scatter(x=[golden['API (%)']], y=[golden['EFRF']], mode='markers', name='🏆 Golden Solution', marker=dict(size=22, color='gold', symbol='star', line=dict(width=1.5, color='#8a6d00'))))
-    if tested:
-        fig.add_trace(go.Scatter(x=[tested['api']], y=[tested['efrf']], mode='markers', name='🔵 Tested Formulation', marker=dict(size=14, color='blue', symbol='circle', line=dict(width=1.5, color='white'))))
-
-    fig.add_hline(y=0.40, line_dash='dash', line_color='gray', annotation_text='EFRF limit (0.40)', annotation_position='top left')
-    fig.add_vline(x=API_MIN, line_dash='dash', line_color='gray', annotation_text=f'API min ({API_MIN}%)', annotation_position='bottom left')
-    fig.add_vline(x=API_MAX, line_dash='dash', line_color='gray', annotation_text=f'API max ({API_MAX}%)', annotation_position='bottom right')
-    
-    fig.update_layout(title=f'2D Pareto Front - Generation {gen_slider}', xaxis_title='API (%)', yaxis_title='EFRF', height=500, template='plotly_white', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    st.plotly_chart(fig, use_container_width=True)
-
-def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
-    fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 3], z=-obj[:, 1], mode='markers', marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
-    if golden_idx is not None:
-        fig.add_trace(go.Scatter3d(x=[pop[golden_idx, 0]], y=[obj[golden_idx, 3]], z=[-obj[golden_idx, 1]], mode='markers', marker=dict(size=15, color='gold', symbol='diamond'), name='Golden'))
-    if tested_data is not None:
-        fig.add_trace(go.Scatter3d(x=[tested_data['api']], y=[tested_data['efrf']], z=[tested_data['tensile']], mode='markers', marker=dict(size=12, color='blue', symbol='circle', line=dict(color='white', width=1)), name='Tested Formulation'))
-    fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
-    st.plotly_chart(fig, use_container_width=True)
-
-def render_dynamic_radar(solutions_df, selected_solutions):
-    if not selected_solutions: return
-    fig = go.Figure()
-    for i, row in solutions_df.iterrows():
-        if row['Solution'] in selected_solutions:
-            fig.add_trace(go.Scatterpolar(r=[(row['API (%)']-80)/18, row['Density']/0.95, row['Tensile (MPa)']/8.5, 1-row['EFRF'], row['Quality Score']/100], theta=['API%', 'Density', 'Tensile', 'EFRF (Inv)', 'Quality'], fill='toself', name=row['Solution']))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=380)
-    st.plotly_chart(fig, use_container_width=True)
-
-def target_status(value, threshold, mode='min', comfortable=None):
-    if mode == 'min':
-        if value < threshold: return "🔴 Below target"
-        if comfortable is not None and value >= comfortable: return "✅ Excellent"
-        return "✅ Passes (near limit)"
+@st.cache_resource
+def load_pinn_model():
+    # Check if real data is available
+    real_df = st.session_state.get('user_data')
+    if real_df is not None and len(real_df) > 0:
+        st.info(f"Using real data ({len(real_df)} samples)")
+        # Expect columns: API_%, MCC_%, PVPP_%, MgSt_%, Binder_%, Pressure_MPa, Speed_rpm, Granule_Size_µm, Density, Tensile_Strength_MPa, Elastic_Recovery_%
+        required_cols = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
+                         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
+                         'Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']
+        if all(col in real_df.columns for col in required_cols):
+            X_raw = real_df[required_cols[:8]].values
+            y = real_df[required_cols[8:]].values
+            feature_names = required_cols[:8]
+        else:
+            st.error("Uploaded data missing required columns. Falling back to synthetic.")
+            df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+            X_raw = df[feature_names].values
+            y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
     else:
-        if value > threshold: return "🔴 Exceeds limit"
-        if comfortable is not None and value <= comfortable: return "✅ Excellent"
-        return "⚠️ Passes (near limit)"
+        df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+        X_raw = df[feature_names].values
+        y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+
+    X_augmented = add_interaction_features(X_raw)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_augmented)
+    y_scaler = StandardScaler()
+    y_scaled = y_scaler.fit_transform(y)
+
+    # Store y_train_mean (original scale) for OOD shrinkage
+    y_train_mean = y.mean(axis=0)  # [mean_density, mean_tensile, mean_er]
+
+    X_scaled_train, X_scaled_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
+        X_scaled, X_raw, y_scaled, test_size=0.3, random_state=42
+    )
+    X_scaled_val, X_scaled_test, X_raw_val, X_raw_test, y_val, y_test = train_test_split(
+        X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
+    )
+
+    X_scaled_train_t = torch.FloatTensor(X_scaled_train)
+    X_scaled_train_t.requires_grad_(True)
+    X_raw_train_t = torch.FloatTensor(X_raw_train)
+    y_train_t = torch.FloatTensor(y_train)
+    X_scaled_val_t = torch.FloatTensor(X_scaled_val)
+    X_scaled_val_t.requires_grad_(True)
+    X_raw_val_t = torch.FloatTensor(X_raw_val)
+    y_val_t = torch.FloatTensor(y_val)
+
+    model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
+    model.y_train_mean = y_train_mean  # store for later use
+
+    optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
+    best_val_loss = float('inf')
+    patience = PATIENCE
+    counter = 0
+    best_state = None
+    progress_bar = st.progress(0)
+    max_epochs = 3000
+
+    st.info("🧠 Training PINN with enhanced physics (EFRF constraint)...")
+
+    for epoch in range(max_epochs):
+        model.train()
+        optimizer_adam.zero_grad()
+        total_loss, loss_dict = model.compute_loss(
+            X_scaled_train_t, X_raw_train_t, y_train_t,
+            epoch=epoch, max_epochs=max_epochs,
+            w_data=DATA_WEIGHT,
+            w_physics=PHYSICS_WEIGHT,
+            w_efrf=EFRF_CONSTRAINT_WEIGHT,
+            w_mcc=0.1, w_density=0.1,
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True if epoch % 10 == 0 else False,
+            record_loss=True
+        )
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer_adam.step()
+
+        model.eval()
+        with torch.set_grad_enabled(False):
+            val_loss, _ = model.compute_loss(
+                X_scaled_val_t, X_raw_val_t, y_val_t,
+                epoch=epoch, max_epochs=max_epochs,
+                w_data=DATA_WEIGHT,
+                w_physics=PHYSICS_WEIGHT,
+                w_efrf=EFRF_CONSTRAINT_WEIGHT,
+                w_mcc=0.1, w_density=0.1,
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                compute_grad=False,
+                record_loss=False
+            )
+
+        val_loss_value = val_loss.item()
+        model.loss_history['val'].append(val_loss_value)
+        scheduler.step(val_loss_value)
+
+        if val_loss_value < best_val_loss:
+            best_val_loss = val_loss_value
+            counter = 0
+            best_state = model.state_dict().copy()
+        else:
+            counter += 1
+
+        if counter > patience:
+            st.info(f"Early stopping at epoch {epoch}")
+            break
+
+        if (epoch + 1) % 200 == 0:
+            progress_bar.progress(min(1.0, (epoch + 1) / max_epochs))
+
+    progress_bar.progress(1.0)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    model.eval()
+    model.feature_names = feature_names
+    model.scaler = scaler
+    model.y_scaler = y_scaler
+    model.y_train_mean = y_train_mean
+    torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
+    return model, scaler, y_scaler, feature_names, y_train_mean, model.loss_history
 
 # ================================================================
-# UI RENDER FUNCTIONS
+# 10. PREDICTION & PLOTS (with OOD shrinkage & uncertainty)
 # ================================================================
-def render_sidebar():
-    with st.sidebar:
-        st.markdown("## 🧬 Hybrid AI Framework")
-        st.markdown("---"); st.markdown(f"**Version:** v32.0-Ultimate")
-        st.markdown(f"**Institution:** Nile Valley University")
-        st.markdown("---")
-        st.sidebar.header("⚖️ Custom Recommender")
-        w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
-        w_quality = st.sidebar.slider("Weight for Quality", 0.0, 1.0, 0.6)
-        st.sidebar.info("Prioritizes solutions matching your weights.")
-        st.markdown("---")
-        st.caption("© 2024 Nile Valley University · Sudan")
-        return w_api, w_quality
 
-def render_input_panel():
-    st.markdown("## ⚙️ Formulation & Process")
-    col1, col2 = st.columns(2)
-    with col1:
-        api = st.slider("API (%)", API_MIN, API_MAX, 85.0)
-        binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, 5.0)
-        pvpp = st.slider("PVPP (%)", PVPP_MIN, PVPP_MAX, 2.0)
-        mgst = st.slider("MgSt (%)", MGST_MIN, MGST_MAX, 0.5)
-    with col2:
-        mcc = st.slider("MCC (%)", MCC_MIN, MCC_MAX, 4.0)
-        moisture = st.slider("Moisture (%)", MOISTURE_MIN, MOISTURE_MAX, 1.5)
-        pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX, 200.0)
-        speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX, 20.0)
-    return api, binder, pvpp, mgst, mcc, moisture, pressure, speed
+def predict_pinn(model, scaler, y_scaler, y_train_mean, inputs, return_std=False):
+    try:
+        inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+        inputs_scaled = scaler.transform([inputs_with_features])
+        X_tensor = torch.FloatTensor(inputs_scaled)
+        if return_std:
+            pred_mean, pred_std = model.predict_with_uncertainty(X_tensor, n_samples=20)
+            pred_mean = pred_mean[0]
+            pred_std = pred_std[0]
+        else:
+            with torch.no_grad():
+                pred_scaled = model.predict(X_tensor)[0]
+            pred_std = None
+
+        # Inverse transform to original scale
+        # Need to scale back: we have scaled y from y_scaler. But y_scaler is a StandardScaler.
+        # We'll apply inverse transform on the raw predictions (which are in scaled y space)
+        # However, the model outputs are in scaled y space? Actually the model was trained on y_scaled.
+        # The forward pass returns outputs in the same scaled space? No, the model outputs are in original scale because we didn't apply y_scaler inside the model.
+        # We trained on y_scaled but the model outputs raw values (because we didn't scale inside). Wait, careful: In training, we used y_scaled as target, and model outputs are in the same scale as y_scaled? Actually the model outputs are not scaled; we use y_scaled to compute loss, but the model outputs are in the same units as y_scaled because we directly compare. However, the model's forward does not apply inverse scaling; it outputs raw logits that are transformed via sigmoid/softplus to produce values in (0,1) and softplus for positive values. Those are not scaled; they are in the same range as the target (since we scaled y to zero mean and unit variance). So the model outputs are in scaled units. So we need to inverse transform.
+        # So we need to inverse transform using y_scaler.
+        # We'll convert pred_mean to original scale.
+        if return_std:
+            # We have mean and std in scaled space; we need to convert to original scale.
+            # For std, we need to multiply by the scale factor of y_scaler (std of original y).
+            # Simpler: we can inverse transform the mean, and for std, we can multiply by the scale (std).
+            # But we also have to account that we might have multiple outputs.
+            # We'll do:
+            mean_orig = y_scaler.inverse_transform([pred_mean])[0]
+            std_orig = pred_std * y_scaler.scale_  # scale_ is the std of each feature
+            density, tensile, er = mean_orig[0], mean_orig[1], mean_orig[2]
+            std_d, std_t, std_e = std_orig[0], std_orig[1], std_orig[2]
+        else:
+            # pred_scaled is in scaled space
+            pred_original = y_scaler.inverse_transform([pred_scaled])[0]
+            density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
+            std_d = std_t = std_e = None
+
+        # Apply OOD shrinkage on density, tensile, er using y_train_mean (original scale)
+        # We'll reshape to (1,3)
+        pred_raw = np.array([[density, tensile, er]])
+        density_shrunk, tensile_shrunk, er_shrunk = apply_ood_shrinkage(
+            pred_raw, inputs_scaled, y_train_mean
+        )
+        density = float(density_shrunk[0]); tensile = float(tensile_shrunk[0]); er = float(er_shrunk[0])
+
+        if tensile < 0.01:
+            tensile = 0.01
+            efrf = 10.0
+        else:
+            efrf = er / tensile
+            efrf = max(0.0001, min(efrf, 5.0))
+
+        if return_std:
+            # We don't have std after shrinkage; approximate by scaling the original std by the shrink factor?
+            # For simplicity, we'll just return the original std (before shrinkage).
+            # Or we can compute uncertainty on the final values by Monte Carlo over dropout,
+            # but we already have std from MC-Dropout. However, we applied shrinkage deterministically.
+            # A pragmatic approach: keep the std from MC-Dropout as a measure.
+            # We'll return the std of the original predictions (before shrinkage) but scaled.
+            # For now, just return None for std after shrinkage, or we can return the std from MC-Dropout.
+            # We'll return std_d, std_t, std_e for the original unscaled (but after OOD we changed mean).
+            # Better: we can propagate uncertainty through the shrinkage? Not trivial.
+            # We'll just return the std from MC-Dropout as a rough measure.
+            # We'll return std_d, std_t, std_e (these are in original scale for the raw predictions, not shrunk).
+            # We'll multiply by the shrink factor? Not accurate.
+            # Simplification: return the std from MC-Dropout as is.
+            return density, tensile, er, efrf, std_d, std_t, std_e
+        else:
+            return density, tensile, er, efrf
+
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        if return_std:
+            return 0.5, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0
+        else:
+            return 0.5, 0.0, 1.0, 1.0
+
+def plot_training_curves(loss_history):
+    if not loss_history or len(loss_history['train']) == 0:
+        return None
+
+    epochs = list(range(1, len(loss_history['train']) + 1))
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=epochs, y=loss_history['train'],
+        mode='lines', name='Training Loss',
+        line=dict(color='blue', width=2)
+    ))
+
+    if len(loss_history['val']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs[:len(loss_history['val'])], y=loss_history['val'],
+            mode='lines', name='Validation Loss',
+            line=dict(color='orange', width=2, dash='dash')
+        ))
+
+    if len(loss_history['data']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['data'],
+            mode='lines', name='Data Loss',
+            line=dict(color='green', width=1.5)
+        ))
+
+    if len(loss_history['physics']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['physics'],
+            mode='lines', name='Physics Loss',
+            line=dict(color='red', width=1.5)
+        ))
+
+    fig.update_layout(
+        title='Training Curves',
+        xaxis=dict(title='Epoch'),
+        yaxis=dict(title='Loss', type='log'),
+        height=400,
+        hovermode='x unified',
+        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
+    )
+    return fig
+
+def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
+    try:
+        if len(fronts) > 0 and len(fronts[0]) > 0:
+            front0 = fronts[0]
+            pareto_api = -objectives[front0, 0]
+            pareto_efrf = objectives[front0, 1]
+            feasible = constraints[front0]
+            valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0.0001) & (pareto_efrf <= 2)
+            pareto_api = pareto_api[valid_mask]
+            pareto_efrf = pareto_efrf[valid_mask]
+            feasible = feasible[valid_mask]
+            if len(pareto_api) == 0:
+                return None
+            plot_df = pd.DataFrame({'API': pareto_api, 'EFRF': pareto_efrf}).dropna().sort_values('API')
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=-objectives[:, 0], y=objectives[:, 1],
+                mode='markers', marker=dict(size=3, color='gray', opacity=0.3),
+                name='All Solutions'
+            ))
+            fig.add_trace(go.Scatter(
+                x=plot_df['API'], y=plot_df['EFRF'],
+                mode='lines+markers',
+                marker=dict(size=8, color='red'),
+                line=dict(color='red', width=2),
+                name='Pareto Front (Optimal Trade-offs)'
+            ))
+            feasible_indices = [i for i, f in enumerate(feasible) if f]
+            if feasible_indices:
+                feasible_api = [pareto_api[i] for i in feasible_indices]
+                feasible_efrf = [pareto_efrf[i] for i in feasible_indices]
+                fig.add_trace(go.Scatter(
+                    x=feasible_api, y=feasible_efrf,
+                    mode='markers', marker=dict(size=12, color='green', symbol='star'),
+                    name=f'Feasible Formulations ({len(feasible_indices)})',
+                    hovertemplate='API: %{x:.2f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                ))
+            if api and efrf and 85 <= api <= 95 and 0.0001 <= efrf <= 2:
+                fig.add_trace(go.Scatter(
+                    x=[api], y=[efrf],
+                    mode='markers+text',
+                    marker=dict(size=16, color='blue', symbol='diamond'),
+                    text=[f"Your Formulation<br>API: {api:.1f}%<br>EFRF: {efrf:.4f}"],
+                    name='Selected Formulation'
+                ))
+            fig.add_hrect(y0=0, y1=EFRF_MAX, line_width=0, fillcolor="green", opacity=0.1,
+                          annotation_text=f"Safe Zone (EFRF < {EFRF_MAX:.2f})", annotation_position="top left")
+            fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red', annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}')
+            fig.update_layout(
+                title='Pareto Front (NSGA-II)',
+                xaxis=dict(title='API Loading (%)', range=[85, 95]),
+                yaxis=dict(title='EFRF', range=[0, 1.0]),
+                height=500,
+                hovermode='closest',
+                legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
+            )
+            if feasible_indices:
+                best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                best_idx = feasible_indices[best_idx]
+                fig.add_annotation(
+                    x=pareto_api[best_idx],
+                    y=pareto_efrf[best_idx],
+                    text=f"Best<br>API: {pareto_api[best_idx]:.2f}%<br>EFRF: {pareto_efrf[best_idx]:.4f}",
+                    showarrow=True,
+                    arrowhead=2,
+                    ax=20,
+                    ay=-40
+                )
+            return fig
+    except Exception:
+        return None
+    return None
+
+def plot_sensitivity_plotly(inputs, model, scaler, y_scaler, y_train_mean):
+    try:
+        features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+        _, _, _, base_efrf = predict_pinn(model, scaler, y_scaler, y_train_mean, inputs)
+        sensitivities = []
+        for i in range(8):
+            test = inputs.copy()
+            test[i] += 0.05 * (inputs[i] + 0.1)
+            _, _, _, efrf_pos = predict_pinn(model, scaler, y_scaler, y_train_mean, test)
+            test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
+            _, _, _, efrf_neg = predict_pinn(model, scaler, y_scaler, y_train_mean, test)
+            sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+        sorted_idx = np.argsort(sensitivities)[::-1]
+        sorted_names = [features[i] for i in sorted_idx]
+        sorted_values = [sensitivities[i] for i in sorted_idx]
+        fig = go.Figure()
+        colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
+        fig.add_trace(go.Bar(
+            y=sorted_names, x=sorted_values, orientation='h',
+            marker=dict(color=colors),
+            text=[f"{v:.4f}" for v in sorted_values],
+            textposition='outside'
+        ))
+        fig.add_vline(x=np.mean(sensitivities), line_dash='dash', line_color='red',
+                      annotation_text=f'Avg: {np.mean(sensitivities):.4f}')
+        fig.update_layout(
+            title='Sensitivity Analysis (EFRF)',
+            xaxis_title='Sensitivity (ΔEFRF)',
+            yaxis_title='Parameters',
+            height=450
+        )
+        return fig
+    except Exception:
+        return None
+
+def train_and_compare(X_train, X_test, y_train, y_test):
+    models = {}
+    models['MLP'] = MLPRegressor(hidden_layer_sizes=(64, 32, 16), max_iter=1000, random_state=42)
+    models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
+    if XGB_AVAILABLE:
+        models['XGBoost'] = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
+
+    results = []
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        results.append({
+            'Model': name,
+            'R²': r2_score(y_test, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
+            'MAE': mean_absolute_error(y_test, y_pred),
+            'Physics': 'Not enforced'
+        })
+    return pd.DataFrame(results)
 
 # ================================================================
-# MAIN APPLICATION
+# 11. STREAMLIT UI (mostly unchanged, with file uploader in sidebar)
 # ================================================================
-def main():
-    st.title("🧬 Hybrid AI v32.0-Ultimate · Unified 2D/3D/Radar")
-    w_api, w_quality = render_sidebar()
-    api, binder, pvpp, mgst, mcc, moisture, pressure, speed = render_input_panel()
 
-    if st.button("🚀 Run Ultimate Optimization"):
-        # 1. Prepare Progress Bar & Train Model
-        progress_bar = st.progress(0)
-        st.session_state['_train_pb'] = progress_bar
-        with st.spinner("Training Physics Model (1st time takes ~15s)..."):
-            model, scaler = train_model()
-            st.session_state['_train_pb'].progress(1.0)
+st.set_page_config(page_title="PINN Framework v32.1", page_icon="🧬", layout="wide")
+clamp_session_state()
 
-        # 2. Run Optimization
-        start_time = time.time()
-        with st.status("Running NSGA-II + Adaptive Mutation...", expanded=True) as status:
-            opt_bar = st.progress(0)
-            optimizer = AdvancedOptimizer(model, scaler)
-            final_pop, final_obj, gen_history = None, None, None
-            for i, (pop, obj, history, gen) in enumerate(optimizer.optimize()):
-                final_pop, final_obj, gen_history = pop, obj, history
-                opt_bar.progress((gen+1)/NSGA_GENERATIONS)
-                if gen % 10 == 0: status.update(label=f"Generation {gen+1}/{NSGA_GENERATIONS}")
-            status.update(label="Optimization Complete ✅", state="complete")
+st.markdown("""
+<div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
+    <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
+        🧬 Hybrid AI Framework v32.1
+    </h1>
+    <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
+        Physics-Informed Neural Network · Multi-Objective Optimization
+    </p>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
+        Nile Valley University · Postgraduate College · Sudan
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
-        # 3. Process Solutions & Golden Star
-        weights = np.array([w_api, w_quality])
-        scores = []
-        for i in range(len(final_pop)):
-            s = (final_pop[i,0]/100 * weights[0]) + ((1 - final_obj[i].sum()/4) * weights[1])
-            scores.append(s)
-        golden_idx = np.argmax(scores)
-        best_sol = final_pop[golden_idx]
-        
-        pop_scaled = scaler.transform([best_sol])
-        preds, unc = model.predict_with_uncertainty(torch.tensor(pop_scaled, dtype=torch.float32))
-        preds, unc = preds[0], unc[0]
-        st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {unc[2]:.3f}")
-        st.caption(f"Optimization took {time.time() - start_time:.2f} seconds.")
+st.markdown("---")
 
-        # 4. Compute Tested Formulation Data
-        slider_form = np.array([[api, binder, pvpp, mgst, mcc, moisture, pressure, speed]], dtype=np.float32)
-        slider_preds, _ = model.predict_with_uncertainty(torch.tensor(scaler.transform(slider_form), dtype=torch.float32))
-        tested_data = {'api': float(api), 'efrf': float(slider_preds[0][2]), 'tensile': float(slider_preds[0][1])}
+with st.sidebar:
+    st.markdown("### 📚 Physics Constraints")
+    st.markdown(f"""
+    - ✅ **Heckel:** ln(1/(1-D)) = kP + A
+    - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
+    - ✅ **Monotonicity:** ∂D/∂P > 0
+    - ✅ **Boundary:** 0.4 < D < 0.98
+    - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
+    - ✅ **Density:** ≤ 1.0
 
-        # 5. Build Solutions DataFrame for Radar / Exports
-        sol_list = []
-        sorted_indices = np.argsort([-scores[i] for i in range(len(final_pop))])
-        for idx in sorted_indices[:10]:
-            sol_list.append({
-                'Solution': f'S{idx+1}',
-                'API (%)': float(final_pop[idx, 0]),
-                'Density': float(-final_obj[idx, 0]),
-                'Tensile (MPa)': float(-final_obj[idx, 1]),
-                'EFRF': float(final_obj[idx, 3]),
-                'Quality Score': float(100 - (final_obj[idx].sum() * 20))
-            })
-        sol_df = pd.DataFrame(sol_list)
-        golden = {'API (%)': best_sol[0], 'EFRF': preds[2]} # Simplified golden dict for plots
+    **Multi-Task PINN:**
+    - 5 outputs (D, σt, ER, k, A)
+    - **Simplified Architecture:** 64-32-16
+    - **Physics weight:** {PHYSICS_WEIGHT:.2f}
+    - **EFRF constraint weight:** {EFRF_CONSTRAINT_WEIGHT:.2f}
+    - **Dataset size:** {N_SAMPLES}
+    - **Optimizer:** Adam + early stopping
+    """)
 
-        # 6. Render All Visualizations
-        st.subheader("🌐 2D Pareto Front (API vs EFRF)")
-        render_2d_pareto_evolution(gen_history, golden, tested_data)
-        
-        st.subheader("🌐 3D Pareto Front (API - EFRF - Tensile)")
-        render_3d_pareto(final_pop, final_obj, golden_idx, tested_data)
-        
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            st.subheader("🏆 Top Solutions")
-            selected = st.multiselect("Select for Radar", sol_df['Solution'], default=[f'S{str(sorted_indices[0]+1)}', f'S{str(sorted_indices[1]+1)}'])
-        with col_b:
-            st.subheader("📊 Dynamic Radar Comparison")
-            render_dynamic_radar(sol_df, selected)
+    st.markdown("---")
+    st.markdown("### 📂 Real Data Upload")
+    uploaded_file = st.file_uploader("Upload CSV (optional)", type=["csv"])
+    if uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            # Expected columns (matching the synthetic data format)
+            required = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
+                        'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
+                        'Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']
+            if all(col in df.columns for col in required):
+                st.session_state.user_data = df
+                st.success(f"✅ Loaded {len(df)} samples")
+                # Force retrain (clear cache)
+                st.cache_resource.clear()
+                st.info("Model will retrain on the next prediction.")
+            else:
+                st.error("CSV missing required columns. See help.")
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
+    else:
+        if 'user_data' in st.session_state:
+            st.info(f"Using real data ({len(st.session_state.user_data)} samples)")
+        else:
+            st.info("Using synthetic data (fallback)")
 
-        # 7. Sensitivity & Export
-        with st.expander("🔬 Sensitivity Analysis (Local)"):
-            sens_data = perform_sensitivity_analysis(model, scaler, best_sol)
-            if sens_data: st.bar_chart(pd.Series(sens_data))
-            else: st.warning("Could not compute local sensitivity.")
-        
-        report = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'golden_api': float(best_sol[0]), 'golden_efrf': float(preds[2]), 'golden_tensile': float(preds[1]),
-            'top_solutions': sol_df.to_dict('records'), 'tested_formulation': tested_data
-        }
-        st.download_button("📥 Download Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="ultimate_report.json")
+    st.markdown("---")
+    st.info("🔬 **v32.1** — Enhanced physics, OOD shrinkage, uncertainty, mass balance")
 
-if __name__ == "__main__":
-    main()
+with st.spinner("🔄 Training Multi-Task PINN..."):
+    model, scaler, y_scaler, feature_names, y_train_mean, loss_history = load_pinn_model()
+st.success("✅ Multi-Task True PINN trained successfully")
+
+st.markdown("### 🧪 Quick Experiments")
+exp_cols = st.columns(4)
+experiments = {
+    "Baseline (Stable)": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
+    "High Binder": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 5.0, 'pressure': 235, 'speed': 10, 'granule': 125},
+    "High Pressure": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'mcc': 5.0, 'pressure': 250, 'speed': 9, 'granule': 125},
+    "Low Mg-St": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'mcc': 5.0, 'pressure': 245, 'speed': 8, 'granule': 125}
+}
+for i, (name, params) in enumerate(experiments.items()):
+    with exp_cols[i]:
+        if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
+            for key in params:
+                st.session_state[key] = params[key]
+            clamp_session_state()
+            st.rerun()
+
+st.markdown("---")
+col_left, col_right = st.columns([1, 1.2], gap="medium")
+
+with col_left:
+    st.markdown("### 📊 Formulation Parameters")
+    with st.container(border=True):
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, get_safe_value('api'), 0.1, key="api")
+        binder = st.slider("🔗 Binder (%)", BINDER_MIN, BINDER_MAX, get_safe_value('binder'), 0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_safe_value('pvpp'), 0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
+        mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_safe_value('mcc'), 0.1, key="mcc")
+
+        total = api + binder + pvpp + mgst + mcc
+        if abs(total - 100) < 0.1:
+            st.success(f"✅ Total = {total:.2f}%")
+        elif total > 100.1:
+            st.error(f"❌ Total = {total:.2f}% (exceeds 100%)")
+        else:
+            st.warning(f"⚠️ Total = {total:.2f}% (adjust to 100%)")
+
+    st.markdown("### ⚙️ Process Parameters")
+    with st.container(border=True):
+        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
+        speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
+
+    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
+
+with col_right:
+    st.markdown("### 📈 Results")
+
+    if predict_btn:
+        if abs(total - 100) > 0.1:
+            st.warning("⚠️ Formulation must sum to 100%")
+        else:
+            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+            with st.spinner("🧠 Running prediction with uncertainty..."):
+                density, tensile, er, efrf, std_d, std_t, std_e = predict_pinn(
+                    model, scaler, y_scaler, y_train_mean, inputs, return_std=True
+                )
+
+            kpi_cols = st.columns(3)
+            kpi_cols[0].metric("Density", f"{density:.3f}",
+                               delta=f"± {std_d:.3f}" if std_d is not None else "")
+            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa",
+                               delta=f"± {std_t:.3f}" if std_t is not None else "")
+            kpi_cols[2].metric("EFRF", f"{efrf:.4f}",
+                               delta=f"± {std_e:.3f}" if std_e is not None else "")
+
+            st.markdown("---")
+
+            if tensile >= TENSILE_MIN and efrf < EFRF_MAX:
+                st.success(f"✅ Formulation satisfies all constraints (σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
+            elif tensile >= TENSILE_MIN and efrf < 0.45:
+                st.warning(f"⚠️ EFRF = {efrf:.4f} is above {EFRF_MAX:.2f} but within acceptable range")
+            else:
+                st.error(f"❌ Formulation fails constraints")
+
+            st.markdown("### ✅ Feasibility")
+            pass_cols = st.columns(2)
+            pass_cols[0].metric(f"σt ≥ {TENSILE_MIN:.2f} MPa", "✅ PASS" if tensile >= TENSILE_MIN else "❌ FAIL")
+            pass_cols[1].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf < EFRF_MAX else "❌ FAIL")
+
+            with st.expander("🔬 Physics Verification"):
+                try:
+                    inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+                    inputs_scaled = scaler.transform([inputs_with_features])
+                    X_tensor = torch.FloatTensor(inputs_scaled)
+                    with torch.no_grad():
+                        full_output = model.forward(X_tensor).numpy()[0]
+                    st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
+                    st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
+                except:
+                    pass
+
+            st.markdown("### ⚙️ NSGA-II")
+            bounds = np.array([
+                [85, 95], [0, MCC_MAX], [0.5, 6.0], [0.01, 1.2],
+                [BINDER_MIN, BINDER_MAX], [80, PRESSURE_MAX], [1, 50], [30, 250]
+            ])
+            with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
+                start_time = time.time()
+                nsga = NSGAII(model, scaler, bounds,
+                              pop_size=NSGA_POP_SIZE,
+                              n_generations=NSGA_GENERATIONS,
+                              w_tensile=0.0,
+                              y_train_mean=y_train_mean)
+                pop, objectives, constraints, fronts = nsga.run()
+                elapsed = time.time() - start_time
+                st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
+
+                if len(fronts) > 0 and len(fronts[0]) > 0:
+                    front0 = fronts[0]
+                    pareto_api = -objectives[front0, 0]
+                    feasible = constraints[front0]
+                    feasible_indices = [i for i, f in enumerate(feasible) if f]
+                    if feasible_indices:
+                        best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                        best_idx = feasible_indices[best_idx]
+                        st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
+                    else:
+                        st.warning("No feasible solutions found")
+
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(
+                ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison",
+                 "📈 Training Curves", "📄 Report"]
+            )
+
+            with tab1:
+                st.markdown("### 📉 Pareto Front")
+                fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf)
+                if fig_p:
+                    st.plotly_chart(fig_p, use_container_width=True)
+                else:
+                    st.info("Pareto front not available")
+
+            with tab2:
+                st.markdown("### 🔍 Sensitivity Analysis")
+                fig_s = plot_sensitivity_plotly(inputs, model, scaler, y_scaler, y_train_mean)
+                if fig_s:
+                    st.plotly_chart(fig_s, use_container_width=True)
+                else:
+                    st.info("Sensitivity analysis not available")
+
+            comp_df = pd.DataFrame()
+
+            with tab3:
+                st.markdown("### 📊 Model Performance Comparison")
+                st.caption("Hold-out test set (20% of data) — R², RMSE, MAE")
+
+                # Use the same data as training? We'll generate a test set from the original data.
+                # Since we may have real data, we can split from that.
+                if 'user_data' in st.session_state and st.session_state.user_data is not None:
+                    df_real = st.session_state.user_data
+                    X_test_raw = df_real[feature_names].values
+                    y_test = df_real[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+                    # Use a portion as test
+                    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+                        X_test_raw, y_test, test_size=0.2, random_state=42
+                    )
+                else:
+                    # Generate fresh synthetic test set
+                    df_test, _ = generate_pinn_data(n_samples=500, random_state=99)
+                    X_test_raw = df_test[feature_names].values
+                    y_test = df_test[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
+
+                X_test_aug = add_interaction_features(X_test_raw)
+                X_test_scaled = scaler.transform(X_test_aug)
+
+                # PINN prediction
+                pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # tensile
+                y_test_tensile = y_test[:, 1]
+                pinn_r2 = r2_score(y_test_tensile, pinn_pred)
+                pinn_rmse = np.sqrt(mean_squared_error(y_test_tensile, pinn_pred))
+                pinn_mae = mean_absolute_error(y_test_tensile, pinn_pred)
+
+                st.metric("PINN R²", f"{pinn_r2:.4f}", delta="Target > 0.90")
+                col_m1, col_m2 = st.columns(2)
+                col_m1.metric("PINN RMSE", f"{pinn_rmse:.4f} MPa")
+                col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
+                st.divider()
+
+                # Other models
+                comp_df = train_and_compare(X_test_scaled, X_test_scaled, y_test_tensile, y_test_tensile)  # dummy, we'll use same
+                # Actually we need a proper split; but we already have test set.
+                # We'll use the same test set for all models.
+                X_train_ml, X_test_ml, y_train_ml, y_test_ml = train_test_split(
+                    X_test_scaled, y_test_tensile, test_size=0.3, random_state=42
+                )
+                comp_df = train_and_compare(X_train_ml, X_test_ml, y_train_ml, y_test_ml)
+                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
+                comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
+                    fig_r2 = go.Figure(data=[
+                        go.Bar(
+                            x=comp_df['Model'],
+                            y=comp_df['R²'],
+                            marker_color=colors_r2,
+                            text=[f"{v:.4f}" for v in comp_df['R²']],
+                            textposition='outside'
+                        )
+                    ])
+                    fig_r2.update_layout(
+                        title='<b>R² Score Comparison</b>',
+                        yaxis=dict(title='R² Score', range=[0, 1.05]),
+                        height=350,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_r2, use_container_width=True)
+
+                with col2:
+                    colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
+                    fig_rmse = go.Figure(data=[
+                        go.Bar(
+                            x=comp_df['Model'],
+                            y=comp_df['RMSE'],
+                            marker_color=colors_rmse,
+                            text=[f"{v:.4f}" for v in comp_df['RMSE']],
+                            textposition='outside'
+                        )
+                    ])
+                    fig_rmse.update_layout(
+                        title='<b>RMSE Comparison</b>',
+                        yaxis=dict(title='RMSE (MPa)'),
+                        height=350,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_rmse, use_container_width=True)
+
+                st.dataframe(
+                    comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                              .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            with tab4:
+                st.markdown("### 📈 Training Curves")
+                fig_loss = plot_training_curves(loss_history)
+                if fig_loss:
+                    st.plotly_chart(fig_loss, use_container_width=True)
+
+                    if len(loss_history['train']) > 0:
+                        col1, col2 = st.columns(2)
+                        col1.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
+                        col1.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
+                        col2.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
+                        col2.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
+                else:
+                    st.info("Loss history not available")
+
+            with tab5:
+                st.markdown("### 📄 Comprehensive Report (PDF)")
+                st.caption("Download a complete report with formulation details, predictions, training curves, and model comparison.")
+
+                status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                pdf_data = generate_full_pdf_report(
+                    api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                    density, tensile, er, efrf, status, timestamp,
+                    model_comparison_df=comp_df if not comp_df.empty else None,
+                    loss_history=loss_history
+                )
+
+                st.download_button(
+                    label="📥 Download Full Report (PDF)",
+                    data=pdf_data,
+                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
+
+st.markdown("---")
+st.caption(f"🔬 **Multi-Task True PINN — v32.1 (v32.0 UI + v32.4 technical upgrades)**")
+st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
